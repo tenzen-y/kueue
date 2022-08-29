@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1alpha2
 
 import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -31,7 +31,7 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 
 // SetDefaults_Configuration sets default values for ComponentConfig.
 func SetDefaults_Configuration(cfg *Configuration) {
-	if cfg.EnableInternalCertManagement == nil {
-		cfg.EnableInternalCertManagement = pointer.Bool(true)
+	if cfg.InternalCertManagement.Enable == nil {
+		cfg.InternalCertManagement.Enable = pointer.Bool(true)
 	}
 }

@@ -20,6 +20,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+
+	"sigs.k8s.io/kueue/apis/config/v1alpha2"
+	"sigs.k8s.io/kueue/pkg/util/pointer"
 )
 
 func TestApply(t *testing.T) {
@@ -32,7 +37,7 @@ func TestApply(t *testing.T) {
 
 	portOverWriteConfig := filepath.Join(tmpDir, "port-overwrite.yaml")
 	if err := os.WriteFile(portOverWriteConfig, []byte(`
-apiVersion: config.kueue.x-k8s.io/v1alpha1
+apiVersion: config.kueue.x-k8s.io/v1alpha2
 kind: Configuration
 leaderElection:
   leaderElect: true
@@ -42,40 +47,76 @@ webhook:
 		t.Fatal(err)
 	}
 
-	certOverWriteConfig := filepath.Join(tmpDir, "cert-overwrite.yaml")
-	if err := os.WriteFile(certOverWriteConfig, []byte(`
-apiVersion: config.kueue.x-k8s.io/v1alpha1
+	internalCertManagementDisableConfig := filepath.Join(tmpDir, "internal-cert-management-disable.yaml")
+	if err := os.WriteFile(internalCertManagementDisableConfig, []byte(`
+apiVersion: config.kueue.x-k8s.io/v1alpha2
 kind: Configuration
 leaderElection:
   leaderElect: true
-enableInternalCertManagement: false
+internalCertManagement:
+  enable: false
 `), os.FileMode(0600)); err != nil {
 		t.Fatal(err)
 	}
 
+	certOptionsOverWriteConfig := filepath.Join(tmpDir, "cert-options-overwrite.yaml")
+	if err := os.WriteFile(certOptionsOverWriteConfig, []byte(`
+apiVersion: config.kueue.x-k8s.io/v1alpha2
+kind: Configuration
+leaderElection:
+ leaderElect: true
+internalCertManagement:
+ enable: true
+ namespace: tenant-a
+ serviceName: tenant-a-service
+ secretName: tenant-a-secret
+`), os.FileMode(0600)); err != nil {
+		t.Fatal(err)
+	}
+
+	defaultInternalCertManagement := v1alpha2.InternalCertManagement{
+		Enable:      pointer.Bool(true),
+		Namespace:   "kueue-system",
+		ServiceName: "kueue-webhook-service",
+		SecretName:  "kueue-webhook-server-cert",
+	}
+
 	testcases := []struct {
-		name                             string
-		configFile                       string
-		wantPort                         int
-		wantEnableInternalCertManagement bool
+		name                       string
+		configFile                 string
+		wantPort                   int
+		wantInternalCertManagement v1alpha2.InternalCertManagement
 	}{
 		{
-			name:                             "default config",
-			configFile:                       "",
-			wantPort:                         9443,
-			wantEnableInternalCertManagement: true,
+			name:                       "default config",
+			configFile:                 "",
+			wantPort:                   9443,
+			wantInternalCertManagement: defaultInternalCertManagement,
 		},
 		{
-			name:                             "port overwrite config",
-			configFile:                       portOverWriteConfig,
-			wantPort:                         9444,
-			wantEnableInternalCertManagement: true,
+			name:                       "port overwrite config",
+			configFile:                 portOverWriteConfig,
+			wantPort:                   9444,
+			wantInternalCertManagement: defaultInternalCertManagement,
 		},
 		{
-			name:                             "cert overwrite config",
-			configFile:                       certOverWriteConfig,
-			wantPort:                         9443,
-			wantEnableInternalCertManagement: false,
+			name:       "internal cert management disable config",
+			configFile: internalCertManagementDisableConfig,
+			wantPort:   9443,
+			wantInternalCertManagement: v1alpha2.InternalCertManagement{
+				Enable: pointer.Bool(false),
+			},
+		},
+		{
+			name:       "cert options overwrite config",
+			configFile: certOptionsOverWriteConfig,
+			wantPort:   9443,
+			wantInternalCertManagement: v1alpha2.InternalCertManagement{
+				Enable:      pointer.Bool(true),
+				Namespace:   "tenant-a",
+				ServiceName: "tenant-a-service",
+				SecretName:  "tenant-a-secret",
+			},
 		},
 	}
 
@@ -87,8 +128,8 @@ enableInternalCertManagement: false
 				t.Fatalf("got unexpected port, want: %v, got: %v", tc.wantPort, options.Port)
 			}
 
-			if *config.EnableInternalCertManagement != tc.wantEnableInternalCertManagement {
-				t.Fatalf("got unexpected enableInternalCertManagement, want: %v, got: %v", tc.wantEnableInternalCertManagement, *config.EnableInternalCertManagement)
+			if diff := cmp.Diff(tc.wantInternalCertManagement, config.InternalCertManagement); diff != "" {
+				t.Fatalf("got unexpected internalCertManagement, want: %v, got: %v", tc.wantInternalCertManagement, config.InternalCertManagement)
 			}
 		})
 	}

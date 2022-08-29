@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1alpha1
+package v1alpha2
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,8 +39,27 @@ type Configuration struct {
 	// unsuspended, they will start immediately.
 	ManageJobsWithoutQueueName bool `json:"manageJobsWithoutQueueName"`
 
-	// EnableInternalCertManagement controls whether to enable internal cert management or not.
+	// InternalCertManagement is configuration for internalCertManagement
+	InternalCertManagement InternalCertManagement `json:"internalCertManagement,omitempty"`
+}
+
+type InternalCertManagement struct {
+
+	// Enable controls whether to enable internal cert management or not.
 	// Defaults to true. If you want to use a third-party management, e.g. cert-manager,
 	// set it to false. See the user guide for more information.
-	EnableInternalCertManagement *bool `json:"enableInternalCertManagement,omitempty"`
+	Enable *bool `json:"enable,omitempty"`
+
+	// Namespace is the namespace where Service and Secret are deployed and
+	// is also used as part of DNSName.
+	// Defaults to kueue-system.
+	Namespace string `json:"namespace,omitempty"`
+
+	// ServiceName is used as part of the DNSName.
+	// Default to kueue-webhook-service.
+	ServiceName string `json:"serviceName,omitempty"`
+
+	// SecretName is used to store CA and server certs.
+	// Default to kueue-webhook-server-cert.
+	SecretName string `json:"secretName,omitempty"`
 }
