@@ -44,7 +44,7 @@ func TestSetDefaults_Configuration(t *testing.T) {
 			original: &Configuration{
 				Namespace: "kueue-tenant-a",
 				InternalCertManagement: &InternalCertManagement{
-					Enable: pointer.Bool(false),
+					Enable:      pointer.Bool(false),
 					ServiceName: "",
 					SecretName:  "",
 				},
