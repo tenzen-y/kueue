@@ -31,7 +31,27 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 
 // SetDefaults_Configuration sets default values for ComponentConfig.
 func SetDefaults_Configuration(cfg *Configuration) {
+	const (
+		defaultNamespace   = "kueue-system"
+		defaultServiceName = "kueue-webhook-service"
+		defaultSecretName  = "kueue-webhook-server-cert"
+	)
+
+	if cfg.Namespace == "" {
+		cfg.Namespace = defaultNamespace
+	}
+	if cfg.InternalCertManagement == nil {
+		cfg.InternalCertManagement = &InternalCertManagement{}
+	}
 	if cfg.InternalCertManagement.Enable == nil {
 		cfg.InternalCertManagement.Enable = pointer.Bool(true)
+	}
+	if *cfg.InternalCertManagement.Enable {
+		if cfg.InternalCertManagement.ServiceName == "" {
+			cfg.InternalCertManagement.ServiceName = defaultServiceName
+		}
+		if cfg.InternalCertManagement.SecretName == "" {
+			cfg.InternalCertManagement.SecretName = defaultSecretName
+		}
 	}
 }

@@ -27,6 +27,10 @@ import (
 type Configuration struct {
 	metav1.TypeMeta `json:",inline"`
 
+	// Namespace is the namespace in which kueue is deployed and is also used as part of DNSName.
+	// Defaults to kueue-system.
+	Namespace string `json:"namespace,omitempty"`
+
 	// ControllerManagerConfigurationSpec returns the configurations for controllers
 	cfg.ControllerManagerConfigurationSpec `json:",inline"`
 
@@ -40,7 +44,7 @@ type Configuration struct {
 	ManageJobsWithoutQueueName bool `json:"manageJobsWithoutQueueName"`
 
 	// InternalCertManagement is configuration for internalCertManagement
-	InternalCertManagement InternalCertManagement `json:"internalCertManagement,omitempty"`
+	InternalCertManagement *InternalCertManagement `json:"internalCertManagement,omitempty"`
 }
 
 type InternalCertManagement struct {
@@ -49,11 +53,6 @@ type InternalCertManagement struct {
 	// Defaults to true. If you want to use a third-party management, e.g. cert-manager,
 	// set it to false. See the user guide for more information.
 	Enable *bool `json:"enable,omitempty"`
-
-	// Namespace is the namespace where Service and Secret are deployed and
-	// is also used as part of DNSName.
-	// Defaults to kueue-system.
-	Namespace string `json:"namespace,omitempty"`
 
 	// ServiceName is used as part of the DNSName.
 	// Default to kueue-webhook-service.

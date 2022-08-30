@@ -39,14 +39,14 @@ const (
 //+kubebuilder:rbac:groups="admissionregistration.k8s.io",resources=validatingwebhookconfigurations,verbs=get;list;watch;update
 
 // ManageCerts creates all certs for webhooks. This function is called from main.go.
-func ManageCerts(mgr ctrl.Manager, certOpts *configv1alpha2.InternalCertManagement, setupFinished chan struct{}) error {
+func ManageCerts(mgr ctrl.Manager, config configv1alpha2.Configuration, setupFinished chan struct{}) error {
 	// DNSName is <service name>.<namespace>.svc
-	var dnsName = fmt.Sprintf("%s.%s.svc", certOpts.ServiceName, certOpts.Namespace)
+	var dnsName = fmt.Sprintf("%s.%s.svc", config.InternalCertManagement.ServiceName, config.Namespace)
 
 	return cert.AddRotator(mgr, &cert.CertRotator{
 		SecretKey: types.NamespacedName{
-			Namespace: certOpts.Namespace,
-			Name:      certOpts.SecretName,
+			Namespace: config.Namespace,
+			Name:      config.InternalCertManagement.SecretName,
 		},
 		CertDir:        certDir,
 		CAName:         caName,

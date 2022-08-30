@@ -103,7 +103,7 @@ func main() {
 	certsReady := make(chan struct{})
 
 	if *config.InternalCertManagement.Enable {
-		if err = cert.ManageCerts(mgr, &config.InternalCertManagement, certsReady); err != nil {
+		if err = cert.ManageCerts(mgr, config, certsReady); err != nil {
 			setupLog.Error(err, "Unable to set up cert rotation")
 			os.Exit(1)
 		}
@@ -240,7 +240,6 @@ func apply(configFile string) (ctrl.Options, configv1alpha2.Configuration) {
 	}
 
 	setOptionDefaults(&options)
-	setInternalCertManagementDefaults(&config.InternalCertManagement)
 	return options, config
 }
 
@@ -256,19 +255,5 @@ func setOptionDefaults(opt *ctrl.Options) {
 	}
 	if opt.LeaderElectionID == "" {
 		opt.LeaderElectionID = "c1f6bfd2.kueue.x-k8s.io"
-	}
-}
-
-func setInternalCertManagementDefaults(certOpts *configv1alpha2.InternalCertManagement) {
-	if *certOpts.Enable {
-		if certOpts.ServiceName == "" {
-			certOpts.ServiceName = "kueue-webhook-service"
-		}
-		if certOpts.SecretName == "" {
-			certOpts.SecretName = "kueue-webhook-server-cert"
-		}
-		if certOpts.Namespace == "" {
-			certOpts.Namespace = "kueue-system"
-		}
 	}
 }

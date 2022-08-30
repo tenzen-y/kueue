@@ -6,7 +6,8 @@ Changes since `v0.2.1`:
 
 - Upgrade the config.kueue.x-k8s.io API version from v1alpha1 to v1alpha2. v1alpha1 is no longer supported.
   v1alpha2 includes the following changes:
-  - Add InternalCertManagement with fields Enable, Namespace, ServiceName and SecretName. 
+  - Add Namespace. 
+  - Add InternalCertManagement with fields Enable, ServiceName and SecretName. 
   - Remove EnableInternalCertManagement. Use InternalCertManagement.Enable instead.
 
 ### Bug fixes
