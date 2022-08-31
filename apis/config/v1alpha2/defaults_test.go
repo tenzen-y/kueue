@@ -15,13 +15,13 @@ func TestSetDefaults_Configuration(t *testing.T) {
 	}{
 		"defaulting namespace": {
 			original: &Configuration{
-				Namespace: "",
+				Namespace: nil,
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
 			},
 			want: &Configuration{
-				Namespace: "kueue-system",
+				Namespace: pointer.String("kueue-system"),
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
@@ -29,32 +29,32 @@ func TestSetDefaults_Configuration(t *testing.T) {
 		},
 		"defaulting InternalCertManagement": {
 			original: &Configuration{
-				Namespace: "kueue-tenant-a",
+				Namespace: pointer.String("kueue-tenant-a"),
 			},
 			want: &Configuration{
-				Namespace: "kueue-tenant-a",
+				Namespace: pointer.String("kueue-tenant-a"),
 				InternalCertManagement: &InternalCertManagement{
 					Enable:      pointer.Bool(true),
-					ServiceName: "kueue-webhook-service",
-					SecretName:  "kueue-webhook-server-cert",
+					ServiceName: pointer.String("kueue-webhook-service"),
+					SecretName:  pointer.String("kueue-webhook-server-cert"),
 				},
 			},
 		},
 		"should not defaulting InternalCertManagement": {
 			original: &Configuration{
-				Namespace: "kueue-tenant-a",
+				Namespace: pointer.String("kueue-tenant-a"),
 				InternalCertManagement: &InternalCertManagement{
 					Enable:      pointer.Bool(false),
-					ServiceName: "",
-					SecretName:  "",
+					ServiceName: nil,
+					SecretName:  nil,
 				},
 			},
 			want: &Configuration{
-				Namespace: "kueue-tenant-a",
+				Namespace: pointer.String("kueue-tenant-a"),
 				InternalCertManagement: &InternalCertManagement{
 					Enable:      pointer.Bool(false),
-					ServiceName: "",
-					SecretName:  "",
+					ServiceName: nil,
+					SecretName:  nil,
 				},
 			},
 		},

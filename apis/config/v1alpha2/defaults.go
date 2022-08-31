@@ -37,8 +37,8 @@ func SetDefaults_Configuration(cfg *Configuration) {
 		defaultSecretName  = "kueue-webhook-server-cert"
 	)
 
-	if cfg.Namespace == "" {
-		cfg.Namespace = defaultNamespace
+	if cfg.Namespace == nil {
+		cfg.Namespace = pointer.String(defaultNamespace)
 	}
 	if cfg.InternalCertManagement == nil {
 		cfg.InternalCertManagement = &InternalCertManagement{}
@@ -47,11 +47,11 @@ func SetDefaults_Configuration(cfg *Configuration) {
 		cfg.InternalCertManagement.Enable = pointer.Bool(true)
 	}
 	if *cfg.InternalCertManagement.Enable {
-		if cfg.InternalCertManagement.ServiceName == "" {
-			cfg.InternalCertManagement.ServiceName = defaultServiceName
+		if cfg.InternalCertManagement.ServiceName == nil {
+			cfg.InternalCertManagement.ServiceName = pointer.String(defaultServiceName)
 		}
-		if cfg.InternalCertManagement.SecretName == "" {
-			cfg.InternalCertManagement.SecretName = defaultSecretName
+		if cfg.InternalCertManagement.SecretName == nil {
+			cfg.InternalCertManagement.SecretName = pointer.String(defaultSecretName)
 		}
 	}
 }

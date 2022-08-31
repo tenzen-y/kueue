@@ -29,7 +29,7 @@ type Configuration struct {
 
 	// Namespace is the namespace in which kueue is deployed and is also used as part of DNSName.
 	// Defaults to kueue-system.
-	Namespace string `json:"namespace,omitempty"`
+	Namespace *string `json:"namespace,omitempty"`
 
 	// ControllerManagerConfigurationSpec returns the configurations for controllers
 	cfg.ControllerManagerConfigurationSpec `json:",inline"`
@@ -56,9 +56,9 @@ type InternalCertManagement struct {
 
 	// ServiceName is used as part of the DNSName.
 	// Default to kueue-webhook-service.
-	ServiceName string `json:"serviceName,omitempty"`
+	ServiceName *string `json:"serviceName,omitempty"`
 
 	// SecretName is used to store CA and server certs.
 	// Default to kueue-webhook-server-cert.
-	SecretName string `json:"secretName,omitempty"`
+	SecretName *string `json:"secretName,omitempty"`
 }

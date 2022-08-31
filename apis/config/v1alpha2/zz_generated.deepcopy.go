@@ -29,6 +29,11 @@ import (
 func (in *Configuration) DeepCopyInto(out *Configuration) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
+	if in.Namespace != nil {
+		in, out := &in.Namespace, &out.Namespace
+		*out = new(string)
+		**out = **in
+	}
 	in.ControllerManagerConfigurationSpec.DeepCopyInto(&out.ControllerManagerConfigurationSpec)
 	if in.InternalCertManagement != nil {
 		in, out := &in.InternalCertManagement, &out.InternalCertManagement
@@ -61,6 +66,16 @@ func (in *InternalCertManagement) DeepCopyInto(out *InternalCertManagement) {
 	if in.Enable != nil {
 		in, out := &in.Enable, &out.Enable
 		*out = new(bool)
+		**out = **in
+	}
+	if in.ServiceName != nil {
+		in, out := &in.ServiceName, &out.ServiceName
+		*out = new(string)
+		**out = **in
+	}
+	if in.SecretName != nil {
+		in, out := &in.SecretName, &out.SecretName
+		*out = new(string)
 		**out = **in
 	}
 }
