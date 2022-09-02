@@ -55,10 +55,10 @@ type InternalCertManagement struct {
 	Enable *bool `json:"enable,omitempty"`
 
 	// ServiceName is used as part of the DNSName.
-	// Default to kueue-webhook-service.
+	// Defaults to kueue-webhook-service.
 	ServiceName *string `json:"serviceName,omitempty"`
 
 	// SecretName is used to store CA and server certs.
-	// Default to kueue-webhook-server-cert.
+	// Defaults to kueue-webhook-server-cert.
 	SecretName *string `json:"secretName,omitempty"`
 }
