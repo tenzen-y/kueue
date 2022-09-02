@@ -10,8 +10,8 @@ leaderElection:
   leaderElect: true
   resourceName: c1f6bfd2.kueue.x-k8s.io
 #manageJobsWithoutQueueName: true
-#namespace: ""
-#internalCertManagement:
-#  enable: false
-#  webhookServiceName: ""
-#  webhookSecretName: ""
+namespace: kueue-tenant-a
+internalCertManagement:
+  enable: true
+  webhookServiceName: kueue-tenant-a-webhook-service
+  webhookSecretName: kueue-tenant-a-webhook-server-cert

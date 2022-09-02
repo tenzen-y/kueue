@@ -5,7 +5,7 @@ replacements:
       # If you change `metadata.name` in `config/components/secret.yaml` and
       # `internalCertManagement.secretName` in `config/components/manager/controller_manager_config.yaml`,
       # you should update the below name.
-      name: webhook-server-cert
+      name: tenant-a-webhook-server-cert
       fieldPath: metadata.name
     targets:
       - select:
@@ -22,7 +22,7 @@ replacements:
       # If you change `metadata.name` in `config/components/secret.yaml` and
       # `internalCertManagement.serviceName` in `config/components/manager/controller_manager_config.yaml`,
       # you should update the below name.
-      name: webhook-service
+      name: tenant-a-webhook-service
       fieldPath: metadata.name
     targets:
       - select:
@@ -46,7 +46,7 @@ replacements:
           create: true
 
 # Adds namespace to all resources.
-namespace: kueue-system
+namespace: kueue-tenant-a
 
 # Value of this field is prepended to the
 # names of all resources, e.g. a deployment named
