@@ -22,6 +22,12 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/pointer"
 )
 
+const (
+	defaultNamespace   = "kueue-system"
+	defaultServiceName = "kueue-webhook-service"
+	defaultSecretName  = "kueue-webhook-server-cert"
+)
+
 func addDefaultingFuncs(scheme *runtime.Scheme) error {
 	scheme.AddTypeDefaultingFunc(&Configuration{}, func(obj interface{}) {
 		SetDefaults_Configuration(obj.(*Configuration))
@@ -31,12 +37,6 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 
 // SetDefaults_Configuration sets default values for ComponentConfig.
 func SetDefaults_Configuration(cfg *Configuration) {
-	const (
-		defaultNamespace   = "kueue-system"
-		defaultServiceName = "kueue-webhook-service"
-		defaultSecretName  = "kueue-webhook-server-cert"
-	)
-
 	if cfg.Namespace == nil {
 		cfg.Namespace = pointer.String(defaultNamespace)
 	}

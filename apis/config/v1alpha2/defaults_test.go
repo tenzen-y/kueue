@@ -24,12 +24,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/pointer"
 )
 
-const (
-	defaultNamespace   = "kueue-system"
-	defaultServiceName = "kueue-webhook-service"
-	defaultSecretName  = "kueue-webhook-server-cert"
-	overwriteNamespace = "kueue-tenant-a"
-)
+const overwriteNamespace = "kueue-tenant-a"
 
 func TestSetDefaults_Configuration(t *testing.T) {
 	testCases := map[string]struct {
