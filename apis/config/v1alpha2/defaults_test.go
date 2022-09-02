@@ -24,6 +24,13 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/pointer"
 )
 
+const (
+	defaultNamespace   = "kueue-system"
+	defaultServiceName = "kueue-webhook-service"
+	defaultSecretName  = "kueue-webhook-server-cert"
+	overwriteNamespace = "kueue-tenant-a"
+)
+
 func TestSetDefaults_Configuration(t *testing.T) {
 	testCases := map[string]struct {
 		original *Configuration
@@ -36,7 +43,7 @@ func TestSetDefaults_Configuration(t *testing.T) {
 				},
 			},
 			want: &Configuration{
-				Namespace: pointer.String("kueue-system"),
+				Namespace: pointer.String(defaultNamespace),
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
@@ -44,26 +51,26 @@ func TestSetDefaults_Configuration(t *testing.T) {
 		},
 		"defaulting InternalCertManagement": {
 			original: &Configuration{
-				Namespace: pointer.String("kueue-tenant-a"),
+				Namespace: pointer.String(overwriteNamespace),
 			},
 			want: &Configuration{
-				Namespace: pointer.String("kueue-tenant-a"),
+				Namespace: pointer.String(overwriteNamespace),
 				InternalCertManagement: &InternalCertManagement{
 					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String("kueue-webhook-service"),
-					SecretName:  pointer.String("kueue-webhook-server-cert"),
+					ServiceName: pointer.String(defaultServiceName),
+					SecretName:  pointer.String(defaultSecretName),
 				},
 			},
 		},
 		"should not defaulting InternalCertManagement": {
 			original: &Configuration{
-				Namespace: pointer.String("kueue-tenant-a"),
+				Namespace: pointer.String(overwriteNamespace),
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
 			},
 			want: &Configuration{
-				Namespace: pointer.String("kueue-tenant-a"),
+				Namespace: pointer.String(overwriteNamespace),
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
