@@ -51,9 +51,9 @@ func TestSetDefaults_Configuration(t *testing.T) {
 			want: &Configuration{
 				Namespace: pointer.String(overwriteNamespace),
 				InternalCertManagement: &InternalCertManagement{
-					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String(defaultServiceName),
-					SecretName:  pointer.String(defaultSecretName),
+					Enable:             pointer.Bool(true),
+					WebhookServiceName: pointer.String(defaultServiceName),
+					WebhookSecretName:  pointer.String(defaultSecretName),
 				},
 			},
 		},

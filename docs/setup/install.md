@@ -94,8 +94,8 @@ data:
     manageJobsWithoutQueueName: true
     internalCertManagement:
       enable: true
-      serviceName: kueue-tenant-a-service
-      secretName: kueue-tenant-a-webhook-service
+      webhookServiceName: kueue-tenant-a-service
+      webhookSecretName: kueue-tenant-a-webhook-server-cert
 ```
 
 3. Apply the customized manifests to the cluster:

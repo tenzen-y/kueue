@@ -68,13 +68,13 @@ func (in *InternalCertManagement) DeepCopyInto(out *InternalCertManagement) {
 		*out = new(bool)
 		**out = **in
 	}
-	if in.ServiceName != nil {
-		in, out := &in.ServiceName, &out.ServiceName
+	if in.WebhookServiceName != nil {
+		in, out := &in.WebhookServiceName, &out.WebhookServiceName
 		*out = new(string)
 		**out = **in
 	}
-	if in.SecretName != nil {
-		in, out := &in.SecretName, &out.SecretName
+	if in.WebhookSecretName != nil {
+		in, out := &in.WebhookSecretName, &out.WebhookSecretName
 		*out = new(string)
 		**out = **in
 	}

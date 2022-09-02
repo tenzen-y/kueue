@@ -13,5 +13,5 @@ leaderElection:
 #namespace: ""
 #internalCertManagement:
 #  enable: false
-#  serviceName: ""
-#  secretName: ""
+#  webhookServiceName: ""
+#  webhookSecretName: ""

@@ -47,11 +47,11 @@ func SetDefaults_Configuration(cfg *Configuration) {
 		cfg.InternalCertManagement.Enable = pointer.Bool(true)
 	}
 	if *cfg.InternalCertManagement.Enable {
-		if cfg.InternalCertManagement.ServiceName == nil {
-			cfg.InternalCertManagement.ServiceName = pointer.String(defaultServiceName)
+		if cfg.InternalCertManagement.WebhookServiceName == nil {
+			cfg.InternalCertManagement.WebhookServiceName = pointer.String(defaultServiceName)
 		}
-		if cfg.InternalCertManagement.SecretName == nil {
-			cfg.InternalCertManagement.SecretName = pointer.String(defaultSecretName)
+		if cfg.InternalCertManagement.WebhookSecretName == nil {
+			cfg.InternalCertManagement.WebhookSecretName = pointer.String(defaultSecretName)
 		}
 	}
 }

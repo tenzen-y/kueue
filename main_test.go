@@ -137,6 +137,12 @@ internalCertManagement:
 		LeaderElection:         true,
 	}
 
+	enableDefaultInternalCertManagement := &configv1alpha2.InternalCertManagement{
+		Enable:             pointer.Bool(true),
+		WebhookServiceName: pointer.String(defaultServiceName),
+		WebhookSecretName:  pointer.String(defaultSecretName),
+	}
+
 	cmpOpts := []cmp.Option{
 		cmpopts.IgnoreFields(ctrl.Options{}, "Scheme",
 			"makeBroadcaster",
@@ -160,9 +166,9 @@ internalCertManagement:
 			wantConfiguration: configv1alpha2.Configuration{
 				Namespace: pointer.String(defaultNamespace),
 				InternalCertManagement: &configv1alpha2.InternalCertManagement{
-					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String(defaultServiceName),
-					SecretName:  pointer.String(defaultSecretName),
+					Enable:             pointer.Bool(true),
+					WebhookServiceName: pointer.String(defaultServiceName),
+					WebhookSecretName:  pointer.String(defaultSecretName),
 				},
 			},
 			wantOptions: ctrl.Options{
@@ -198,11 +204,7 @@ internalCertManagement:
 						Port: pointer.Int(defaultWebhookPort),
 					},
 				},
-				InternalCertManagement: &configv1alpha2.InternalCertManagement{
-					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String(defaultServiceName),
-					SecretName:  pointer.String(defaultSecretName),
-				},
+				InternalCertManagement: enableDefaultInternalCertManagement,
 			},
 			wantOptions: defaultControlOptions,
 		},
@@ -231,11 +233,7 @@ internalCertManagement:
 						Port: pointer.Int(9444),
 					},
 				},
-				InternalCertManagement: &configv1alpha2.InternalCertManagement{
-					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String(defaultServiceName),
-					SecretName:  pointer.String(defaultSecretName),
-				},
+				InternalCertManagement: enableDefaultInternalCertManagement,
 			},
 			wantOptions: ctrl.Options{
 				HealthProbeBindAddress: ":38081",
@@ -270,11 +268,7 @@ internalCertManagement:
 						Port: pointer.Int(defaultWebhookPort),
 					},
 				},
-				InternalCertManagement: &configv1alpha2.InternalCertManagement{
-					Enable:      pointer.Bool(true),
-					ServiceName: pointer.String("kueue-tenant-a-webhook-service"),
-					SecretName:  pointer.String("kueue-tenant-a-webhook-server-cert"),
-				},
+				InternalCertManagement: enableDefaultInternalCertManagement,
 			},
 			wantOptions: defaultControlOptions,
 		},
