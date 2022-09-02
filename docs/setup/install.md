@@ -64,14 +64,15 @@ To install a custom-configured released version of Kueue in your cluster, execut
 VERSION=v0.2.1
 wget https://github.com/kubernetes-sigs/kueue/releases/download/$VERSION/manifests.yaml
 ```
-1. With an editor of your preference, open `manifests.yaml`.
-2. In the `kueue-manager-config` ConfigMap manifest, edit the
+
+2. With an editor of your preference, open `manifests.yaml`.
+3. In the `kueue-manager-config` ConfigMap manifest, edit the
 `controller_manager_config.yaml` data entry. The entry represents
 the default Kueue Configuration
 struct ([v1alpha1@v0.2.1](https://pkg.go.dev/sigs.k8s.io/kueue@v0.2.1/apis/config/v1alpha1#Configuration)).
 The contents of the ConfigMap are similar to the following:
 
-__namespace and internalCertManagement fields are available in Kueue v0.3.0 and later__
+__ `namespace` and `internalCertManagement` fields are available in Kueue v0.3.0 and later__
 
 ```yaml
 apiVersion: v1
