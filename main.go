@@ -102,7 +102,7 @@ func main() {
 
 	certsReady := make(chan struct{})
 
-	if *config.InternalCertManagement.Enable {
+	if config.InternalCertManagement != nil && *config.InternalCertManagement.Enable {
 		if err = cert.ManageCerts(mgr, config, certsReady); err != nil {
 			setupLog.Error(err, "Unable to set up cert rotation")
 			os.Exit(1)
