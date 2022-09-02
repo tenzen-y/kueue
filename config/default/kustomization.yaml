@@ -1,3 +1,50 @@
+replacements:
+  - source:
+      version: v1
+      kind: Secret
+      # If you change `metadata.name` in `config/components/secret.yaml` and
+      # `internalCertManagement.secretName` in `config/components/manager/controller_manager_config.yaml`,
+      # you should update the below name.
+      name: webhook-server-cert
+      fieldPath: metadata.name
+    targets:
+      - select:
+          group: apps
+          kind: Deployment
+          name: controller-manager
+        fieldPaths:
+          - spec.template.spec.volumes.0.secret.secretName
+        options:
+          create: true
+  - source:
+      version: v1
+      kind: Service
+      # If you change `metadata.name` in `config/components/secret.yaml` and
+      # `internalCertManagement.serviceName` in `config/components/manager/controller_manager_config.yaml`,
+      # you should update the below name.
+      name: webhook-service
+      fieldPath: metadata.name
+    targets:
+      - select:
+          group: admissionregistration.k8s.io
+          kind: MutatingWebhookConfiguration
+        fieldPaths:
+          - webhooks.0.clientConfig.service.name
+          - webhooks.1.clientConfig.service.name
+          - webhooks.2.clientConfig.service.name
+        options:
+          create: true
+      - select:
+          group: admissionregistration.k8s.io
+          kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - webhooks.0.clientConfig.service.name
+          - webhooks.1.clientConfig.service.name
+          - webhooks.2.clientConfig.service.name
+          - webhooks.3.clientConfig.service.name
+        options:
+          create: true
+
 # Adds namespace to all resources.
 namespace: kueue-system
 
