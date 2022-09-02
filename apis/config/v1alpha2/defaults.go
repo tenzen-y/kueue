@@ -18,8 +18,7 @@ package v1alpha2
 
 import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
-
-	"sigs.k8s.io/kueue/pkg/util/pointer"
+	"k8s.io/utils/pointer"
 )
 
 const (

@@ -20,8 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
-	"sigs.k8s.io/kueue/pkg/util/pointer"
+	"k8s.io/utils/pointer"
 )
 
 const overwriteNamespace = "kueue-tenant-a"
