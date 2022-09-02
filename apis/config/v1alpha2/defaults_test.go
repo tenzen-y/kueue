@@ -31,7 +31,6 @@ func TestSetDefaults_Configuration(t *testing.T) {
 	}{
 		"defaulting namespace": {
 			original: &Configuration{
-				Namespace: nil,
 				InternalCertManagement: &InternalCertManagement{
 					Enable: pointer.Bool(false),
 				},
@@ -60,17 +59,13 @@ func TestSetDefaults_Configuration(t *testing.T) {
 			original: &Configuration{
 				Namespace: pointer.String("kueue-tenant-a"),
 				InternalCertManagement: &InternalCertManagement{
-					Enable:      pointer.Bool(false),
-					ServiceName: nil,
-					SecretName:  nil,
+					Enable: pointer.Bool(false),
 				},
 			},
 			want: &Configuration{
 				Namespace: pointer.String("kueue-tenant-a"),
 				InternalCertManagement: &InternalCertManagement{
-					Enable:      pointer.Bool(false),
-					ServiceName: nil,
-					SecretName:  nil,
+					Enable: pointer.Bool(false),
 				},
 			},
 		},
