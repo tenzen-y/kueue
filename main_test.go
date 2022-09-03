@@ -103,8 +103,8 @@ webhook:
   port: 9443
 internalCertManagement:
   enable: true
-  serviceName: kueue-tenant-a-webhook-service
-  secretName: kueue-tenant-a-webhook-server-cert
+  webhookServiceName: kueue-tenant-a-webhook-service
+  webhookSecretName: kueue-tenant-a-webhook-server-cert
 `), os.FileMode(0600)); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,11 @@ internalCertManagement:
 						Port: pointer.Int(defaultWebhookPort),
 					},
 				},
-				InternalCertManagement: enableDefaultInternalCertManagement,
+				InternalCertManagement: &configv1alpha2.InternalCertManagement{
+					Enable:             pointer.Bool(true),
+					WebhookServiceName: pointer.String("kueue-tenant-a-webhook-service"),
+					WebhookSecretName:  pointer.String("kueue-tenant-a-webhook-server-cert"),
+				},
 			},
 			wantOptions: defaultControlOptions,
 		},
