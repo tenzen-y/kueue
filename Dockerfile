@@ -17,7 +17,7 @@ RUN go mod download
 COPY . .
 
 # Build
-RUN make build GO_BUILD_ENV='CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH}'
+RUN make build GO_BUILD_ENV="CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH}"
 
 FROM --platform=${BUILDPLATFORM} ${BASE_IMAGE}
 WORKDIR /
