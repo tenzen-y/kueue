@@ -18,6 +18,7 @@ package podsready
 
 import (
 	"context"
+	kueuemgr "sigs.k8s.io/kueue/pkg/manager"
 	"testing"
 	"time"
 
@@ -57,26 +58,29 @@ func TestSchedulerWithWaitForPodsReady(t *testing.T) {
 	)
 }
 
-func managerAndSchedulerSetupWithTimeoutAdmission(mgr manager.Manager, ctx context.Context, value time.Duration, blockAdmission bool, requeuingTimestamp config.RequeuingTimestamp) {
-	cfg := config.Configuration{
-		WaitForPodsReady: &config.WaitForPodsReady{
-			Enable:             true,
-			BlockAdmission:     &blockAdmission,
-			Timeout:            &metav1.Duration{Duration: value},
-			RequeuingTimestamp: ptr.To(requeuingTimestamp),
+func managerAndSchedulerSetupWithTimeoutAdmission(ctrlMgr manager.Manager, ctx context.Context, value time.Duration, blockAdmission bool, requeuingTimestamp config.RequeuingTimestamp) {
+	mgr := kueuemgr.Manager{
+		Manager: ctrlMgr,
+		Config: config.Configuration{
+			WaitForPodsReady: &config.WaitForPodsReady{
+				Enable:             true,
+				BlockAdmission:     &blockAdmission,
+				Timeout:            &metav1.Duration{Duration: value},
+				RequeuingTimestamp: ptr.To(requeuingTimestamp),
+			},
 		},
 	}
 
 	err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	cCache := cache.New(mgr.GetClient(), cache.WithPodsReadyTracking(cfg.WaitForPodsReady.Enable && cfg.WaitForPodsReady.BlockAdmission != nil && *cfg.WaitForPodsReady.BlockAdmission))
+	cCache := cache.New(mgr.GetClient(), cache.WithPodsReadyTracking(mgr.Config.WaitForPodsReady.Enable && mgr.Config.WaitForPodsReady.BlockAdmission != nil && *mgr.Config.WaitForPodsReady.BlockAdmission))
 	queues := queue.NewManager(
 		mgr.GetClient(), cCache,
 		queue.WithPodsReadyRequeuingTimestamp(requeuingTimestamp),
 	)
 
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &cfg)
+	failedCtrl, err := core.SetupControllers(mgr, queues, cCache)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 	failedWebhook, err := webhooks.Setup(mgr)

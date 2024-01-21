@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"path/filepath"
+	kueuemgr "sigs.k8s.io/kueue/pkg/manager"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
@@ -54,25 +55,33 @@ func TestAPIs(t *testing.T) {
 	)
 }
 
-func managerSetup(mgr manager.Manager, ctx context.Context) {
-	err := indexer.Setup(ctx, mgr.GetFieldIndexer())
+func managerSetup(ctrlMgr manager.Manager, ctx context.Context) {
+	mgr := kueuemgr.Manager{
+		Manager: ctrlMgr,
+		Config: config.Configuration{
+			ControllerManager: config.ControllerManager{
+				Metrics: config.ControllerMetrics{
+					EnableClusterQueueResources: true,
+				},
+			},
+			QueueVisibility: &config.QueueVisibility{
+				UpdateIntervalSeconds: 2,
+				ClusterQueues: &config.ClusterQueueVisibility{
+					MaxCount: 3,
+				},
+			},
+		},
+	}
+
+	err := indexer.Setup(ctx, ctrlMgr.GetFieldIndexer())
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	failedWebhook, err := webhooks.Setup(mgr)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
 
-	controllersCfg := &config.Configuration{}
-	controllersCfg.Metrics.EnableClusterQueueResources = true
-	controllersCfg.QueueVisibility = &config.QueueVisibility{
-		UpdateIntervalSeconds: 2,
-		ClusterQueues: &config.ClusterQueueVisibility{
-			MaxCount: 3,
-		},
-	}
-
 	cCache := cache.New(mgr.GetClient())
 	queues := queue.NewManager(mgr.GetClient(), cCache)
 
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg)
+	failedCtrl, err := core.SetupControllers(mgr, queues, cCache)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 }

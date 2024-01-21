@@ -760,7 +760,7 @@ integrations:
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			options, cfg, err := Load(test_scheme, tc.configFile)
+			options, cfg, err := load(test_scheme, tc.configFile)
 			if tc.wantError == nil {
 				if err != nil {
 					t.Errorf("Unexpected error:%s", err)
@@ -868,7 +868,7 @@ func TestEncode(t *testing.T) {
 	}
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Encode(tc.scheme, tc.cfg)
+			got, err := encode(tc.scheme, tc.cfg)
 			if err != nil {
 				t.Errorf("Unexpected error:%s", err)
 			}

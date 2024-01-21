@@ -27,13 +27,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	config "sigs.k8s.io/kueue/apis/config/v1beta1"
 	"sigs.k8s.io/kueue/pkg/cache"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/kubeflow/jobs/pytorchjob"
+	kueuemgr "sigs.k8s.io/kueue/pkg/manager"
 	"sigs.k8s.io/kueue/pkg/queue"
 	"sigs.k8s.io/kueue/pkg/scheduler"
 	"sigs.k8s.io/kueue/test/integration/framework"
@@ -73,14 +73,17 @@ func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 }
 
 func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetup {
-	return func(mgr manager.Manager, ctx context.Context) {
+	return func(ctrlMgr manager.Manager, ctx context.Context) {
+		mgr := kueuemgr.Manager{
+			Manager: ctrlMgr,
+		}
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		cCache := cache.New(mgr.GetClient())
 		queues := queue.NewManager(mgr.GetClient(), cCache)
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &config.Configuration{})
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		err = pytorchjob.SetupIndexes(ctx, mgr.GetFieldIndexer())

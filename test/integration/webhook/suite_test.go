@@ -19,6 +19,7 @@ package webhook
 import (
 	"context"
 	"path/filepath"
+	kueuemgr "sigs.k8s.io/kueue/pkg/manager"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
@@ -27,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	config "sigs.k8s.io/kueue/apis/config/v1beta1"
 	"sigs.k8s.io/kueue/pkg/cache"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
@@ -57,7 +57,10 @@ var _ = ginkgo.BeforeSuite(func() {
 		WebhookPath: filepath.Join("..", "..", "..", "config", "components", "webhook"),
 	}
 	cfg = fwk.Init()
-	ctx, k8sClient = fwk.RunManager(cfg, func(mgr manager.Manager, ctx context.Context) {
+	ctx, k8sClient = fwk.RunManager(cfg, func(ctrlMgr manager.Manager, ctx context.Context) {
+		mgr := kueuemgr.Manager{
+			Manager: ctrlMgr,
+		}
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -66,7 +69,7 @@ var _ = ginkgo.BeforeSuite(func() {
 
 		cCache := cache.New(mgr.GetClient())
 		queues := queue.NewManager(mgr.GetClient(), cCache)
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &config.Configuration{})
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 	})
 })

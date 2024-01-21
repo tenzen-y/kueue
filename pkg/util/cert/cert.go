@@ -19,11 +19,12 @@ package cert
 import (
 	"fmt"
 
+	"github.com/go-logr/logr"
 	cert "github.com/open-policy-agent/cert-controller/pkg/rotator"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	config "sigs.k8s.io/kueue/apis/config/v1beta1"
+	configapi "sigs.k8s.io/kueue/apis/config/v1beta1"
 )
 
 const (
@@ -39,7 +40,12 @@ const (
 // +kubebuilder:rbac:groups="admissionregistration.k8s.io",resources=validatingwebhookconfigurations,verbs=get;list;watch;update
 
 // ManageCerts creates all certs for webhooks. This function is called from main.go.
-func ManageCerts(mgr ctrl.Manager, cfg config.Configuration, setupFinished chan struct{}) error {
+func ManageCerts(mgr ctrl.Manager, cfg configapi.Configuration, setupFinished chan struct{}) error {
+	if !isInternalCertManagementEnable(cfg) {
+		close(setupFinished)
+		return nil
+	}
+
 	// DNSName is <service name>.<namespace>.svc
 	var dnsName = fmt.Sprintf("%s.%s.svc", *cfg.InternalCertManagement.WebhookServiceName, *cfg.Namespace)
 
@@ -64,4 +70,14 @@ func ManageCerts(mgr ctrl.Manager, cfg config.Configuration, setupFinished chan 
 		// we expect webhook server will run in primary and secondary instance
 		RequireLeaderElection: false,
 	})
+}
+
+func isInternalCertManagementEnable(cfg configapi.Configuration) bool {
+	return cfg.InternalCertManagement != nil && *cfg.InternalCertManagement.Enable
+}
+
+func WaitForCertsReady(setupLog logr.Logger, certsReady chan struct{}) {
+	setupLog.Info("Waiting for certificate generation to complete")
+	<-certsReady
+	setupLog.Info("Certs ready")
 }

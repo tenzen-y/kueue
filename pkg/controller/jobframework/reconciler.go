@@ -24,6 +24,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -41,7 +42,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/kubeversion"
 	"sigs.k8s.io/kueue/pkg/util/maps"
 	utilpriority "sigs.k8s.io/kueue/pkg/util/priority"
-	"sigs.k8s.io/kueue/pkg/util/slices"
+	utilslices "sigs.k8s.io/kueue/pkg/util/slices"
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
@@ -71,6 +72,7 @@ type Options struct {
 	KubeServerVersion          *kubeversion.ServerVersionFetcher
 	PodNamespaceSelector       *metav1.LabelSelector
 	PodSelector                *metav1.LabelSelector
+	EnabledFrameworks          sets.Set[string]
 }
 
 // Option configures the reconciler.
@@ -112,6 +114,13 @@ func WithPodNamespaceSelector(s *metav1.LabelSelector) Option {
 func WithPodSelector(s *metav1.LabelSelector) Option {
 	return func(o *Options) {
 		o.PodSelector = s
+	}
+}
+
+// WithEnabledFrameworks adds framework names enabled in the ConfigAPI.
+func WithEnabledFrameworks(f sets.Set[string]) Option {
+	return func(o *Options) {
+		o.EnabledFrameworks = f.Clone()
 	}
 }
 
@@ -623,7 +632,7 @@ func expectedRunningPodSets(ctx context.Context, c client.Client, wl *kueue.Work
 	if err != nil {
 		return nil
 	}
-	infoMap := slices.ToRefMap(info, func(psi *podset.PodSetInfo) string { return psi.Name })
+	infoMap := utilslices.ToRefMap(info, func(psi *podset.PodSetInfo) string { return psi.Name })
 	runningPodSets := wl.Spec.DeepCopy().PodSets
 	canBePartiallyAdmitted := workload.CanBePartiallyAdmitted(wl)
 	for i := range runningPodSets {
@@ -942,7 +951,7 @@ func GetPodSetsInfoFromWorkload(wl *kueue.Workload) []podset.PodSetInfo {
 		return nil
 	}
 
-	return slices.Map(wl.Spec.PodSets, podset.FromPodSet)
+	return utilslices.Map(wl.Spec.PodSets, podset.FromPodSet)
 
 }
 

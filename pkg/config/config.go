@@ -19,7 +19,11 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"os"
+	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -129,7 +133,7 @@ func addLeaderElectionTo(o *ctrl.Options, cfg *configapi.Configuration) {
 	}
 }
 
-func Encode(scheme *runtime.Scheme, cfg *configapi.Configuration) (string, error) {
+func encode(scheme *runtime.Scheme, cfg *configapi.Configuration) (string, error) {
 	codecs := serializer.NewCodecFactory(scheme)
 	const mediaType = runtime.ContentTypeYAML
 	info, ok := runtime.SerializerInfoForMediaType(codecs.SupportedMediaTypes(), mediaType)
@@ -147,7 +151,7 @@ func Encode(scheme *runtime.Scheme, cfg *configapi.Configuration) (string, error
 
 // Load returns a set of controller options and configuration from the given file, if the config file path is empty
 // it used the default configapi values.
-func Load(scheme *runtime.Scheme, configFile string) (ctrl.Options, configapi.Configuration, error) {
+func load(scheme *runtime.Scheme, configFile string) (ctrl.Options, configapi.Configuration, error) {
 	var err error
 	options := ctrl.Options{
 		Scheme: scheme,
@@ -167,4 +171,44 @@ func Load(scheme *runtime.Scheme, configFile string) (ctrl.Options, configapi.Co
 	}
 	addTo(&options, &cfg)
 	return options, cfg, err
+}
+
+func Apply(configFile string, scheme *runtime.Scheme, setupLog logr.Logger) (ctrl.Options, configapi.Configuration, error) {
+	options, cfg, err := load(scheme, configFile)
+	if err != nil {
+		return options, cfg, err
+	}
+
+	if cfg.Integrations != nil {
+		var errors field.ErrorList
+		availableFrameworks := jobframework.GetIntegrationsList()
+		path := field.NewPath("integrations", "frameworks")
+		for _, framework := range cfg.Integrations.Frameworks {
+			if _, found := jobframework.GetIntegration(framework); !found {
+				errors = append(errors, field.NotSupported(path, framework, availableFrameworks))
+			}
+		}
+		if len(errors) > 0 {
+			return options, cfg, errors.ToAggregate()
+		}
+	}
+
+	cfgStr, err := encode(scheme, &cfg)
+	if err != nil {
+		return options, cfg, err
+	}
+	setupLog.Info("Successfully loaded configuration", "config", cfgStr)
+
+	return options, cfg, nil
+}
+
+func EnabledFrameworks(cfg *configapi.Configuration) sets.Set[string] {
+	if cfg.Integrations == nil || len(cfg.Integrations.Frameworks) == 0 {
+		return nil
+	}
+	return sets.New(cfg.Integrations.Frameworks...)
+}
+
+func IsWaitForPodsReadyEnable(cfg *configapi.Configuration) bool {
+	return cfg.WaitForPodsReady != nil && cfg.WaitForPodsReady.Enable
 }

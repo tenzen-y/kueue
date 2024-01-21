@@ -17,9 +17,8 @@ limitations under the License.
 package core
 
 import (
+	"sigs.k8s.io/kueue/pkg/manager"
 	"time"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta1"
 	"sigs.k8s.io/kueue/pkg/cache"
@@ -31,7 +30,7 @@ const updateChBuffer = 10
 
 // SetupControllers sets up the core controllers. It returns the name of the
 // controller that failed to create and an error, if any.
-func SetupControllers(mgr ctrl.Manager, qManager *queue.Manager, cc *cache.Cache, cfg *config.Configuration) (string, error) {
+func SetupControllers(mgr manager.Manager, qManager *queue.Manager, cc *cache.Cache) (string, error) {
 	rfRec := NewResourceFlavorReconciler(mgr.GetClient(), qManager, cc)
 	if err := rfRec.SetupWithManager(mgr); err != nil {
 		return "ResourceFlavor", err
@@ -49,9 +48,9 @@ func SetupControllers(mgr ctrl.Manager, qManager *queue.Manager, cc *cache.Cache
 		mgr.GetClient(),
 		qManager,
 		cc,
-		WithQueueVisibilityUpdateInterval(queueVisibilityUpdateInterval(cfg)),
-		WithQueueVisibilityClusterQueuesMaxCount(queueVisibilityClusterQueuesMaxCount(cfg)),
-		WithReportResourceMetrics(cfg.Metrics.EnableClusterQueueResources),
+		WithQueueVisibilityUpdateInterval(queueVisibilityUpdateInterval(&mgr.Config)),
+		WithQueueVisibilityClusterQueuesMaxCount(queueVisibilityClusterQueuesMaxCount(&mgr.Config)),
+		WithReportResourceMetrics(mgr.Config.Metrics.EnableClusterQueueResources),
 		WithWatchers(rfRec, acRec),
 	)
 	if err := mgr.Add(cqRec); err != nil {
@@ -65,7 +64,7 @@ func SetupControllers(mgr ctrl.Manager, qManager *queue.Manager, cc *cache.Cache
 	if err := NewWorkloadReconciler(mgr.GetClient(), qManager, cc,
 		mgr.GetEventRecorderFor(constants.WorkloadControllerName),
 		WithWorkloadUpdateWatchers(qRec, cqRec),
-		WithPodsReadyTimeout(podsReadyTimeout(cfg))).SetupWithManager(mgr); err != nil {
+		WithPodsReadyTimeout(podsReadyTimeout(&mgr.Config))).SetupWithManager(mgr); err != nil {
 		return "Workload", err
 	}
 	return "", nil

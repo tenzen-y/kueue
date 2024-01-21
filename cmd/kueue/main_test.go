@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sigs.k8s.io/kueue/pkg/config"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	config "sigs.k8s.io/kueue/apis/config/v1beta1"
+	configapi "sigs.k8s.io/kueue/apis/config/v1beta1"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/job"
 )
 
@@ -61,44 +62,44 @@ integrations:
 		t.Fatal(err)
 	}
 
-	enableDefaultInternalCertManagement := &config.InternalCertManagement{
+	enableDefaultInternalCertManagement := &configapi.InternalCertManagement{
 		Enable:             ptr.To(true),
-		WebhookServiceName: ptr.To(config.DefaultWebhookServiceName),
-		WebhookSecretName:  ptr.To(config.DefaultWebhookSecretName),
+		WebhookServiceName: ptr.To(configapi.DefaultWebhookServiceName),
+		WebhookSecretName:  ptr.To(configapi.DefaultWebhookSecretName),
 	}
 
 	configCmpOpts := []cmp.Option{
-		cmpopts.IgnoreFields(config.Configuration{}, "ControllerManager"),
+		cmpopts.IgnoreFields(configapi.Configuration{}, "ControllerManager"),
 	}
 
-	defaultClientConnection := &config.ClientConnection{
-		QPS:   ptr.To(config.DefaultClientConnectionQPS),
-		Burst: ptr.To(config.DefaultClientConnectionBurst),
+	defaultClientConnection := &configapi.ClientConnection{
+		QPS:   ptr.To(configapi.DefaultClientConnectionQPS),
+		Burst: ptr.To(configapi.DefaultClientConnectionBurst),
 	}
 
 	testcases := []struct {
 		name              string
 		configFile        string
-		wantConfiguration config.Configuration
+		wantConfiguration configapi.Configuration
 		wantError         error
 	}{
 		{
 			name:       "integrations config",
 			configFile: integrationsConfig,
-			wantConfiguration: config.Configuration{
+			wantConfiguration: configapi.Configuration{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: config.GroupVersion.String(),
+					APIVersion: configapi.GroupVersion.String(),
 					Kind:       "Configuration",
 				},
-				Namespace:                  ptr.To(config.DefaultNamespace),
+				Namespace:                  ptr.To(configapi.DefaultNamespace),
 				ManageJobsWithoutQueueName: false,
 				InternalCertManagement:     enableDefaultInternalCertManagement,
 				ClientConnection:           defaultClientConnection,
-				Integrations: &config.Integrations{
+				Integrations: &configapi.Integrations{
 					// referencing job.FrameworkName ensures the link of job package
 					// therefore the batch/framework should be registered
 					Frameworks: []string{job.FrameworkName},
-					PodOptions: &config.PodIntegrationOptions{
+					PodOptions: &configapi.PodIntegrationOptions{
 						NamespaceSelector: &metav1.LabelSelector{
 							MatchExpressions: []metav1.LabelSelectorRequirement{
 								{
@@ -111,10 +112,10 @@ integrations:
 						PodSelector: &metav1.LabelSelector{},
 					},
 				},
-				QueueVisibility: &config.QueueVisibility{
-					UpdateIntervalSeconds: config.DefaultQueueVisibilityUpdateIntervalSeconds,
-					ClusterQueues: &config.ClusterQueueVisibility{
-						MaxCount: config.DefaultClusterQueuesMaxCount,
+				QueueVisibility: &configapi.QueueVisibility{
+					UpdateIntervalSeconds: configapi.DefaultQueueVisibilityUpdateIntervalSeconds,
+					ClusterQueues: &configapi.ClusterQueueVisibility{
+						MaxCount: configapi.DefaultClusterQueuesMaxCount,
 					},
 				},
 			},
@@ -128,7 +129,7 @@ integrations:
 
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, cfg, err := apply(tc.configFile)
+			_, cfg, err := config.Apply(tc.configFile)
 			if tc.wantError == nil {
 				if err != nil {
 					t.Errorf("Unexpected error:%s", err)
