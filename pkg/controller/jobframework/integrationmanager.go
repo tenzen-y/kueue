@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"testing"
 
@@ -187,8 +186,7 @@ func (m *integrationManager) getJobTypeForOwner(ownerRef *metav1.OwnerReference)
 }
 
 func (m *integrationManager) checkEnabledListDependencies(enabledSet sets.Set[string]) error {
-	enabled := enabledSet.UnsortedList()
-	slices.Sort(enabled)
+	enabled := sets.List(enabledSet)
 	for _, integration := range enabled {
 		cbs, found := m.integrations[integration]
 		if !found {
