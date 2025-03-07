@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -27,9 +28,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/kueue/pkg/controller/constants"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
-	controllerconsts "sigs.k8s.io/kueue/pkg/controller/constants"
 )
 
 var (
@@ -131,29 +132,35 @@ func IndexerByConfigFunction(controllerName string, gvk schema.GroupVersionKind)
 }
 
 // FilterForController - returns a list of check names controlled by ControllerName.
-func FilterForController(ctx context.Context, c client.Client, states []kueue.AdmissionCheckState, controllerName string) ([]string, error) {
-	var retActive []string
-	for _, state := range states {
-		ac := &kueue.AdmissionCheck{}
-
-		if err := c.Get(ctx, types.NamespacedName{Name: state.Name}, ac); client.IgnoreNotFound(err) != nil {
-			return nil, err
-		} else if err == nil && ac.Spec.ControllerName == controllerName {
-			retActive = append(retActive, ac.Name)
+func FilterForController(ctx context.Context, c client.Client, states []kueue.AdmissionCheckState, controllerName string) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		for _, state := range states {
+			ac := &kueue.AdmissionCheck{}
+			if err := c.Get(ctx, types.NamespacedName{Name: state.Name}, ac); client.IgnoreNotFound(err) != nil {
+				if !yield("", err) {
+					return
+				}
+			} else if err == nil && ac.Spec.ControllerName == controllerName {
+				if !yield(ac.Name, nil) {
+					return
+				}
+			}
 		}
 	}
-	return retActive, nil
 }
 
 // FilterProvReqAnnotations returns annotations containing the Provisioning Request annotation prefix.
-func FilterProvReqAnnotations(annotations map[string]string) map[string]string {
-	res := make(map[string]string)
-	for k, v := range annotations {
-		if strings.HasPrefix(k, controllerconsts.ProvReqAnnotationPrefix) {
-			res[k] = v
+func FilterProvReqAnnotations(annotations map[string]string) iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for key, value := range annotations {
+			if !strings.HasPrefix(key, constants.ProvReqAnnotationPrefix) {
+				continue
+			}
+			if !yield(key, value) {
+				return
+			}
 		}
 	}
-	return res
 }
 
 // NewAdmissionChecks aggregates AdmissionChecks from .spec.AdmissionChecks and .spec.AdmissionChecksStrategy

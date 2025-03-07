@@ -134,26 +134,24 @@ func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	// get the lists of relevant checks
-	relevantChecks, err := admissioncheck.FilterForController(ctx, c.client, wl.Status.AdmissionChecks, kueue.ProvisioningRequestControllerName)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	checkConfig := make(map[string]*kueue.ProvisioningRequestConfig, len(relevantChecks))
-	for _, checkName := range relevantChecks {
-		prc, err := c.helper.ConfigForAdmissionCheck(ctx, checkName)
+	checkConfigs := make(map[string]*kueue.ProvisioningRequestConfig)
+	for check, err := range admissioncheck.FilterForController(ctx, c.client, wl.Status.AdmissionChecks, kueue.ProvisioningRequestControllerName) {
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		prc, err := c.helper.ConfigForAdmissionCheck(ctx, check)
 		if client.IgnoreNotFound(err) != nil {
 			return reconcile.Result{}, err
 		}
-		checkConfig[checkName] = prc
+		checkConfigs[check] = prc
 	}
 
-	activeOrLastPRForChecks := c.activeOrLastPRForChecks(ctx, wl, checkConfig, provisioningRequestList.Items)
+	activeOrLastPRForChecks := c.activeOrLastPRForChecks(ctx, wl, checkConfigs, provisioningRequestList.Items)
 
 	wlInfo := workloadInfo{
 		checkStates: make([]kueue.AdmissionCheckState, 0),
 	}
-	err = c.syncCheckStates(ctx, wl, &wlInfo, checkConfig, activeOrLastPRForChecks)
+	err = c.syncCheckStates(ctx, wl, &wlInfo, checkConfigs, activeOrLastPRForChecks)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -164,7 +162,7 @@ func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 
-	requeueAfter, err := c.syncOwnedProvisionRequest(ctx, wl, &wlInfo, checkConfig, activeOrLastPRForChecks)
+	requeueAfter, err := c.syncOwnedProvisionRequest(ctx, wl, &wlInfo, checkConfigs, activeOrLastPRForChecks)
 	if err != nil {
 		// this can also delete unneeded checks
 		log.V(2).Error(err, "syncOwnedProvisionRequest failed")

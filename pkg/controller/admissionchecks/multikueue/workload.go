@@ -175,7 +175,7 @@ func (w *wlReconciler) Reconcile(ctx context.Context, req reconcile.Request) (re
 		isDeleted = !wl.DeletionTimestamp.IsZero()
 	}
 
-	mkAc, err := w.multikueueAC(ctx, wl)
+	mkAc, err := w.multiKueueAC(ctx, wl)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -267,16 +267,14 @@ func (w *wlReconciler) remoteClientsForAC(ctx context.Context, acName string) (m
 	return clients, nil
 }
 
-func (w *wlReconciler) multikueueAC(ctx context.Context, local *kueue.Workload) (*kueue.AdmissionCheckState, error) {
-	relevantChecks, err := admissioncheck.FilterForController(ctx, w.client, local.Status.AdmissionChecks, kueue.MultiKueueControllerName)
-	if err != nil {
-		return nil, err
+func (w *wlReconciler) multiKueueAC(ctx context.Context, local *kueue.Workload) (*kueue.AdmissionCheckState, error) {
+	for check, err := range admissioncheck.FilterForController(ctx, w.client, local.Status.AdmissionChecks, kueue.MultiKueueControllerName) {
+		if err != nil {
+			return nil, err
+		}
+		return workload.FindAdmissionCheck(local.Status.AdmissionChecks, check), nil
 	}
-
-	if len(relevantChecks) == 0 {
-		return nil, nil
-	}
-	return workload.FindAdmissionCheck(local.Status.AdmissionChecks, relevantChecks[0]), nil
+	return nil, nil
 }
 
 func (w *wlReconciler) adapter(local *kueue.Workload) (jobframework.MultiKueueAdapter, *metav1.OwnerReference) {

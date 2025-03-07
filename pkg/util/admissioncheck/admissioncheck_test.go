@@ -211,8 +211,13 @@ func TestFilterCheckStates(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			gotResult, _ := FilterForController(ctx, client, tc.states, "test-controller")
-
+			var gotResult []string
+			for check, err := range FilterForController(ctx, client, tc.states, "test-controller") {
+				if err != nil {
+					t.Fatalf("Failed to filter by controller: %v", err)
+				}
+				gotResult = append(gotResult, check)
+			}
 			if diff := cmp.Diff(tc.wantResult, gotResult); diff != "" {
 				t.Errorf("unexpected result (-want/+got):\n%s", diff)
 			}
