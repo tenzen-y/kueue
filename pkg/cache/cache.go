@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"sort"
 	"sync"
 
@@ -855,19 +856,22 @@ func (c *Cache) ClusterQueuesUsingFlavor(flavor kueue.ResourceFlavorReference) [
 	return cqs
 }
 
-func (c *Cache) ClusterQueuesUsingTopology(tName kueue.TopologyReference) []kueue.ClusterQueueReference {
-	c.RLock()
-	defer c.RUnlock()
-	var cqs []kueue.ClusterQueueReference
+func (c *Cache) ClusterQueuesUsingTopology(tName kueue.TopologyReference) iter.Seq[kueue.ClusterQueueReference] {
+	return func(yield func(kueue.ClusterQueueReference) bool) {
+		c.RLock()
+		defer c.RUnlock()
 
-	for _, cq := range c.hm.ClusterQueues() {
-		for _, tRef := range cq.tasFlavors {
-			if tRef == tName {
-				cqs = append(cqs, cq.Name)
+		for _, cq := range c.hm.ClusterQueues() {
+			for _, tRef := range cq.tasFlavors {
+				if tRef != tName {
+					continue
+				}
+				if !yield(cq.Name) {
+					return
+				}
 			}
 		}
 	}
-	return cqs
 }
 
 func (c *Cache) ClusterQueuesUsingAdmissionCheck(ac string) []kueue.ClusterQueueReference {
