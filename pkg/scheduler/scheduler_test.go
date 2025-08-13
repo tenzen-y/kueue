@@ -822,39 +822,41 @@ func TestSchedule(t *testing.T) {
 		"workload exceeds lending limit when borrow in cohort": {
 			workloads: []kueue.Workload{
 				*utiltesting.MakeWorkload("a", "lend").
-					Request(corev1.ResourceCPU, "2").
-					ReserveQuota(utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "2000m").Obj()).
+					Queue("lend-b-queue").
+					Request(corev1.ResourceCPU, "4").
+					ReserveQuota(utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "4").Obj()). // nominal: 4, borrowed: 2
 					Obj(),
 				*utiltesting.MakeWorkload("b", "lend").
 					Queue("lend-b-queue").
-					Request(corev1.ResourceCPU, "3").
+					Request(corev1.ResourceCPU, "1").
 					Obj(),
 			},
 			wantAssignments: map[workload.Reference]kueue.Admission{
-				"lend/a": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "2000m").Obj(),
+				"lend/a": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "4").Obj(),
 			},
 			wantInadmissibleLeft: map[kueue.ClusterQueueReference][]workload.Reference{
-				"lend-b": {"lend/b"},
+				"lend-b": {"lend/b"}, // because "lend/a" already has borrowed 2 CPU.
 			},
 		},
 		"lendingLimit should not affect assignments when feature disabled": {
 			disableLendingLimit: true,
 			workloads: []kueue.Workload{
 				*utiltesting.MakeWorkload("a", "lend").
-					Request(corev1.ResourceCPU, "2").
-					ReserveQuota(utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "2000m").Obj()).
+					Queue("lend-b-queue").
+					Request(corev1.ResourceCPU, "4").
+					ReserveQuota(utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "4").Obj()). // nominal: 4, borrowed: 2
 					Obj(),
 				*utiltesting.MakeWorkload("b", "lend").
 					Queue("lend-b-queue").
-					Request(corev1.ResourceCPU, "3").
+					Request(corev1.ResourceCPU, "1").
 					Obj(),
 			},
 			wantAssignments: map[workload.Reference]kueue.Admission{
-				"lend/a": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "2000m").Obj(),
-				"lend/b": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "3000m").Obj(),
+				"lend/a": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "4").Obj(),
+				"lend/b": *utiltesting.MakeAdmission("lend-b").Assignment(corev1.ResourceCPU, "default", "1").Obj(),
 			},
 			wantScheduled: []workload.Reference{
-				"lend/b",
+				"lend/b", // because there are no lendingLimit.
 			},
 		},
 		"preempt workloads in ClusterQueue and cohort": {
