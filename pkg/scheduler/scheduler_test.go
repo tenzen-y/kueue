@@ -2784,6 +2784,68 @@ func TestSchedule(t *testing.T) {
 				"eng-beta/b1":  *utiltesting.MakeAdmission("other-beta").Assignment("gpu", "spot", "5").Obj(),
 			},
 		},
+		"tz-test": {
+			enableFairSharing: false,
+			additionalClusterQueues: []kueue.ClusterQueue{
+				*utiltesting.MakeClusterQueue("other-share").
+					Cohort("other").
+					NamespaceSelector(&metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{{
+							Key:      "name",
+							Operator: metav1.LabelSelectorOpIn,
+							Values:   []string{"eng-alpha"},
+						}},
+					}).
+					ResourceGroup(
+						utiltesting.MakeFlavorQuotas("on-demand").Resource("gpu", "1").FlavorQuotas,
+					).
+					Obj(),
+				*utiltesting.MakeClusterQueue("other-alpha").
+					Cohort("other").
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+					}).
+					ResourceGroup(
+						utiltesting.MakeFlavorQuotas("on-demand").Resource("gpu", "7").FlavorQuotas,
+					).
+					Obj(),
+				*utiltesting.MakeClusterQueue("other-beta").
+					Cohort("other").
+					ResourceGroup(
+						utiltesting.MakeFlavorQuotas("on-demand").Resource("gpu", "3").FlavorQuotas,
+					).
+					Obj(),
+			},
+			additionalLocalQueues: []kueue.LocalQueue{
+				*utiltesting.MakeLocalQueue("other", "eng-alpha").ClusterQueue("other-alpha").Obj(),
+				*utiltesting.MakeLocalQueue("other", "eng-beta").ClusterQueue("other-beta").Obj(),
+			},
+			workloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("a1", "eng-alpha").
+					Queue("other").
+					Request("gpu", "7").
+					SimpleReserveQuota("other-alpha", "on-demand", now).
+					Obj(),
+				*utiltesting.MakeWorkload("b1", "eng-beta").
+					Queue("other").
+					Request("gpu", "4").
+					SimpleReserveQuota("other-beta", "on-demand", now).
+					Obj(),
+				//*utiltesting.MakeWorkload("preemptor", "eng-alpha").
+				//	Queue("other").
+				//	Request("gpu", "2").
+				//	Obj(),
+			},
+			wantPreempted: sets.New("eng-beta/b1"),
+			wantLeft: map[kueue.ClusterQueueReference][]string{
+				"other-alpha": {"eng-alpha/preemptor"},
+			},
+			wantAssignments: map[string]kueue.Admission{
+				"eng-alpha/a1": *utiltesting.MakeAdmission("other-alpha").Assignment("gpu", "on-demand", "6").Obj(),
+				"eng-beta/b1":  *utiltesting.MakeAdmission("other-beta").Assignment("gpu", "on-demand", "4").Obj(),
+			},
+		},
 		"with fair sharing: prefer reclamation over cq priority based preemption; with preemption while borrowing": {
 			// We enable fair sharing so that preemption while borrowing is enabled.
 			// Flavor 1, on-demand, requires priority-based preemption in CQ.
@@ -3372,8 +3434,8 @@ func TestSchedule(t *testing.T) {
 				WithLists(&kueue.WorkloadList{Items: tc.workloads}, &kueue.LocalQueueList{Items: allQueues}).
 				WithObjects(append(
 					[]client.Object{
-						utiltesting.MakeNamespaceWrapper("eng-alpha").Label("dep", "eng").Obj(),
-						utiltesting.MakeNamespaceWrapper("eng-beta").Label("dep", "eng").Obj(),
+						utiltesting.MakeNamespaceWrapper("eng-alpha").Label("dep", "eng").Label("name", "eng-alpha").Obj(),
+						utiltesting.MakeNamespaceWrapper("eng-beta").Label("dep", "eng").Label("name", "eng-beta").Obj(),
 						utiltesting.MakeNamespaceWrapper("eng-gamma").Label("dep", "eng").Obj(),
 						utiltesting.MakeNamespaceWrapper("sales").Label("dep", "sales").Obj(),
 						utiltesting.MakeNamespaceWrapper("lend").Label("dep", "lend").Obj(),
