@@ -1927,7 +1927,9 @@ func TestFairPreemptions(t *testing.T) {
 				Resource(corev1.ResourceCPU, "0").Obj()).
 			Obj(),
 	}
-	unitWl := *utiltesting.MakeWorkload("unit", "").Request(corev1.ResourceCPU, "1")
+	unitWl := *utiltesting.MakeWorkload("unit", "").
+		Request(corev1.ResourceCPU, "1").
+		Request(corev1.ResourceMemory, "1Gi")
 	cases := map[string]struct {
 		clusterQueues []*kueue.ClusterQueue
 		cohorts       []*kueuealpha.Cohort
@@ -2305,6 +2307,63 @@ func TestFairPreemptions(t *testing.T) {
 				targetKeyReason("/b1", kueue.InCohortFairSharingReason),
 				targetKeyReason("/b2", kueue.InCohortFairSharingReason),
 				targetKeyReason("/b3", kueue.InCohortFairSharingReason),
+			),
+		},
+		"tz-test": {
+			clusterQueues: []*kueue.ClusterQueue{
+				utiltesting.MakeClusterQueue("a").
+					Cohort("all").
+					ResourceGroup(*utiltesting.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2", "100000").
+						Resource(corev1.ResourceMemory, "2Gi", "100000Gi").
+						Obj()).
+					FlavorFungibility(kueue.FlavorFungibility{
+						WhenCanBorrow:  kueue.Preempt,
+						WhenCanPreempt: kueue.Preempt,
+					}).
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+						// This will be ignored when fair sharing enabling.
+						BorrowWithinCohort: &kueue.BorrowWithinCohort{
+							MaxPriorityThreshold: ptr.To[int32](80000),
+							Policy:               kueue.BorrowWithinCohortPolicyLowerPriority,
+						},
+					}).
+					FairWeight(resource.MustParse("10")).
+					Obj(),
+				utiltesting.MakeClusterQueue("b").
+					Cohort("all").
+					ResourceGroup(*utiltesting.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2", "100000").
+						Resource(corev1.ResourceMemory, "2Gi", "100000Gi").
+						Obj()).
+					FlavorFungibility(kueue.FlavorFungibility{
+						WhenCanBorrow:  kueue.Preempt,
+						WhenCanPreempt: kueue.Preempt,
+					}).
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+						// This will be ignored when fair sharing enabling.
+						BorrowWithinCohort: &kueue.BorrowWithinCohort{
+							MaxPriorityThreshold: ptr.To[int32](80000),
+							Policy:               kueue.BorrowWithinCohortPolicyLowerPriority,
+						},
+					}).
+					FairWeight(resource.MustParse("10")).
+					Obj(),
+			},
+			admitted: []kueue.Workload{
+				*unitWl.Clone().Name("a1").SimpleReserveQuota("a", "default", now).Obj(),
+				*unitWl.Clone().Name("b1").SimpleReserveQuota("b", "default", now).Obj(),
+				*unitWl.Clone().Name("b3").SimpleReserveQuota("b", "default", now).Obj(),
+				*unitWl.Clone().Name("b4").SimpleReserveQuota("b", "default", now).Obj(),
+			},
+			incoming: unitWl.Clone().Name("a_incoming").Queue("a").Obj(),
+			targetCQ: "a",
+			wantPreempted: sets.New(
+				targetKeyReason("/b1", kueue.InCohortFairSharingReason),
 			),
 		},
 		"can't preempt nominal from CQ with 0 weight": {
@@ -2769,6 +2828,9 @@ func TestFairPreemptions(t *testing.T) {
 			targets := preemptor.GetTargets(log, *wlInfo, singlePodSetAssignment(
 				flavorassigner.ResourceAssignment{
 					corev1.ResourceCPU: &flavorassigner.FlavorAssignment{
+						Name: "default", Mode: flavorassigner.Preempt,
+					},
+					corev1.ResourceMemory: &flavorassigner.FlavorAssignment{
 						Name: "default", Mode: flavorassigner.Preempt,
 					},
 				},
