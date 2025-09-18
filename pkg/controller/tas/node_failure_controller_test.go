@@ -154,7 +154,6 @@ func TestNodeFailureReconciler(t *testing.T) {
 			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
 			wantUnhealthyNodes: nil,
 		},
-
 		"Node Found and Unhealthy (NotReady), delay not passed - not marked as unavailable": {
 			initObjs: []client.Object{
 				baseNode.Clone().StatusConditions(corev1.NodeCondition{
@@ -232,7 +231,17 @@ func TestNodeFailureReconciler(t *testing.T) {
 			reconcileRequests: []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
 			wantRequeue:       1 * time.Second,
 		},
-
+		"Node NotReady, no active Pods, skip to mark as unavailable": {
+			featureGates: []featuregate.Feature{features.TASReplaceNodeOnPodTermination},
+			initObjs: []client.Object{
+				baseNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: now}).Obj(),
+				baseWorkload.DeepCopy(),
+			},
+			reconcileRequests: []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
+		},
 		"Node Deleted - marked as unavailable": {
 			initObjs: []client.Object{
 				baseWorkload.DeepCopy(),

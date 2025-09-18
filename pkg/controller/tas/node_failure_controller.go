@@ -201,20 +201,25 @@ func (r *nodeFailureReconciler) getWorkloadsOnNode(ctx context.Context, nodeName
 	return tasWorkloadsOnNode, nil
 }
 
-func (r *nodeFailureReconciler) getWorkloadsForImmediateReplacement(ctx context.Context, nodeName string) (sets.Set[types.NamespacedName], error) {
+func (r *nodeFailureReconciler) getWorkloadsForImmediateReplacement(ctx context.Context, nodeName string) (sets.Set[types.NamespacedName], bool, error) {
 	tasWorkloadsOnNode, err := r.getWorkloadsOnNode(ctx, nodeName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list all workloads on node: %w", err)
+		return nil, false, fmt.Errorf("failed to list all workloads on node: %w", err)
 	}
 
 	affectedWorkloads := sets.New[types.NamespacedName]()
+	existActivePods := false
 	for wlKey := range tasWorkloadsOnNode {
 		var podsForWl corev1.PodList
-		if err := r.client.List(ctx, &podsForWl, client.InNamespace(wlKey.Namespace), client.MatchingFields{indexer.WorkloadNameKey: wlKey.Name}); err != nil {
-			return nil, fmt.Errorf("failed to list pods for workload %s: %w", wlKey, err)
+		if err = r.client.List(ctx, &podsForWl, client.InNamespace(wlKey.Namespace), client.MatchingFields{indexer.WorkloadNameKey: wlKey.Name}); err != nil {
+			return nil, existActivePods, fmt.Errorf("failed to list pods for workload %s: %w", wlKey, err)
+		}
+		if len(podsForWl.Items) == 0 {
+			continue
 		}
 		allPodsTerminate := true
 		for _, pod := range podsForWl.Items {
+			existActivePods = true
 			if pod.Spec.NodeName == nodeName && pod.DeletionTimestamp.IsZero() && !utilpod.IsTerminated(&pod) {
 				allPodsTerminate = false
 				break
@@ -224,7 +229,7 @@ func (r *nodeFailureReconciler) getWorkloadsForImmediateReplacement(ctx context.
 			affectedWorkloads.Insert(wlKey)
 		}
 	}
-	return affectedWorkloads, nil
+	return affectedWorkloads, existActivePods, nil
 }
 
 // evictWorkloadIfNeeded idempotently evicts the workload when the node has failed.
@@ -285,10 +290,12 @@ func (r *nodeFailureReconciler) handleUnhealthyNode(ctx context.Context, nodeNam
 }
 
 func (r *nodeFailureReconciler) reconcileForReplaceNodeOnPodTermination(ctx context.Context, nodeName string) (ctrl.Result, error) {
-	workloads, err := r.getWorkloadsForImmediateReplacement(ctx, nodeName)
+	workloads, existActivePods, err := r.getWorkloadsForImmediateReplacement(ctx, nodeName)
 	switch {
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("could not get workloads for immediate replacement on node %s: %w", nodeName, err)
+	case !existActivePods:
+		return ctrl.Result{}, nil
 	case len(workloads) == 0:
 		return ctrl.Result{RequeueAfter: podTerminationCheckPeriod}, nil
 	default:
