@@ -471,12 +471,7 @@ var _ = ginkgo.Describe("LeaderWorkerSet integration", ginkgo.Label("area:single
 					gomega.Expect(k8sClient.Get(ctx, wlLookupKey1, createdWorkload1)).To(gomega.Succeed())
 				})
 
-				createdWorkload2 := &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      leaderworkerset.GetWorkloadName(lws.UID, lws.Name, "1"),
-						Namespace: ns.Name,
-					},
-				}
+				createdWorkload2 := utiltestingapi.MakeWorkload(leaderworkerset.GetWorkloadName(lws.UID, lws.Name, "1"), ns.Name).Obj()
 				wlLookupKey2 := types.NamespacedName{Name: createdWorkload2.Name, Namespace: createdWorkload2.Namespace}
 				ginkgo.By("Check workload for group 2 is released", func() {
 					gomega.Eventually(func(g gomega.Gomega) {

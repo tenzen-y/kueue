@@ -620,11 +620,7 @@ func TestBestEffortFIFORequeueIfNotPresent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx, _ := utiltesting.ContextWithLog(t)
 			cq, _ := newClusterQueue(ctx, nil,
-				&kueue.ClusterQueue{
-					Spec: kueue.ClusterQueueSpec{
-						QueueingStrategy: kueue.BestEffortFIFO,
-					},
-				},
+				utiltestingapi.MakeClusterQueue("").QueueingStrategy(kueue.BestEffortFIFO).Obj(),
 				workload.Ordering{PodsReadyRequeuingTimestamp: config.EvictionTimestamp},
 				nil, nil, nil)
 			wl := utiltestingapi.MakeWorkload("workload-1", defaultNamespace).Obj()
@@ -649,11 +645,7 @@ func TestBestEffortFIFORequeueIfNotPresent(t *testing.T) {
 func TestFIFOClusterQueue(t *testing.T) {
 	ctx, log := utiltesting.ContextWithLog(t)
 	q, err := newClusterQueue(ctx, nil,
-		&kueue.ClusterQueue{
-			Spec: kueue.ClusterQueueSpec{
-				QueueingStrategy: kueue.StrictFIFO,
-			},
-		},
+		utiltestingapi.MakeClusterQueue("").QueueingStrategy(kueue.StrictFIFO).Obj(),
 		workload.Ordering{
 			PodsReadyRequeuingTimestamp: config.EvictionTimestamp,
 		}, nil, nil, nil)
@@ -662,24 +654,9 @@ func TestFIFOClusterQueue(t *testing.T) {
 	}
 	now := metav1.Now()
 	ws := []*kueue.Workload{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "now",
-				CreationTimestamp: now,
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "before",
-				CreationTimestamp: metav1.NewTime(now.Add(-time.Second)),
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              "after",
-				CreationTimestamp: metav1.NewTime(now.Add(time.Second)),
-			},
-		},
+		utiltestingapi.MakeWorkload("now", "").Creation(now.Time).Obj(),
+		utiltestingapi.MakeWorkload("before", "").Creation(now.Add(-time.Second)).Obj(),
+		utiltestingapi.MakeWorkload("after", "").Creation(now.Add(time.Second)).Obj(),
 	}
 	for _, w := range ws {
 		q.PushOrUpdate(workload.NewInfo(w))
@@ -691,12 +668,7 @@ func TestFIFOClusterQueue(t *testing.T) {
 	if got.Obj.Name != "before" {
 		t.Errorf("Popped workload %q want %q", got.Obj.Name, "before")
 	}
-	wlInfo := workload.NewInfo(&kueue.Workload{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "after",
-			CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
-		},
-	})
+	wlInfo := workload.NewInfo(utiltestingapi.MakeWorkload("after", "").Creation(now.Add(-time.Minute)).Obj())
 	q.PushOrUpdate(wlInfo)
 	got = q.Pop()
 	if got == nil {
@@ -807,11 +779,7 @@ func TestStrictFIFO(t *testing.T) {
 			}
 			ctx, _ := utiltesting.ContextWithLog(t)
 			q, err := newClusterQueue(ctx, nil,
-				&kueue.ClusterQueue{
-					Spec: kueue.ClusterQueueSpec{
-						QueueingStrategy: kueue.StrictFIFO,
-					},
-				},
+				utiltestingapi.MakeClusterQueue("").QueueingStrategy(kueue.StrictFIFO).Obj(),
 				*tt.workloadOrdering,
 				nil, nil, nil)
 			if err != nil {
@@ -851,11 +819,7 @@ func TestStrictFIFORequeueIfNotPresent(t *testing.T) {
 		t.Run(string(reason), func(t *testing.T) {
 			ctx, _ := utiltesting.ContextWithLog(t)
 			cq, _ := newClusterQueue(ctx, nil,
-				&kueue.ClusterQueue{
-					Spec: kueue.ClusterQueueSpec{
-						QueueingStrategy: kueue.StrictFIFO,
-					},
-				},
+				utiltestingapi.MakeClusterQueue("").QueueingStrategy(kueue.StrictFIFO).Obj(),
 				workload.Ordering{PodsReadyRequeuingTimestamp: config.EvictionTimestamp},
 				nil, nil, nil)
 			wl := utiltestingapi.MakeWorkload("workload-1", defaultNamespace).Obj()

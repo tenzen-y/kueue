@@ -1194,12 +1194,7 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 			})
 
 			ginkgo.By("Checking no objects are left in the worker clusters and the PyTorchJob is completed", func() {
-				wl := &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      wlLookupKey.Name,
-						Namespace: wlLookupKey.Namespace,
-					},
-				}
+				wl := utiltestingapi.MakeWorkload(wlLookupKey.Name, wlLookupKey.Namespace).Obj()
 				expectObjectToBeDeletedOnWorkerClusters(ctx, wl)
 				expectObjectToBeDeletedOnWorkerClusters(ctx, pyTorchJob)
 			})
@@ -1256,12 +1251,7 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 			})
 
 			ginkgo.By("Checking no objects are left in the worker clusters and the MPIJob is completed", func() {
-				wl := &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      wlLookupKey.Name,
-						Namespace: wlLookupKey.Namespace,
-					},
-				}
+				wl := utiltestingapi.MakeWorkload(wlLookupKey.Name, wlLookupKey.Namespace).Obj()
 				expectObjectToBeDeletedOnWorkerClusters(ctx, wl)
 				expectObjectToBeDeletedOnWorkerClusters(ctx, mpijob)
 			})
@@ -1300,12 +1290,7 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 			})
 
 			ginkgo.By("Checking no objects are left in the worker clusters and the RayJob is completed", func() {
-				wl := &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      wlLookupKey.Name,
-						Namespace: wlLookupKey.Namespace,
-					},
-				}
+				wl := utiltestingapi.MakeWorkload(wlLookupKey.Name, wlLookupKey.Namespace).Obj()
 				expectObjectToBeDeletedOnWorkerClusters(ctx, wl)
 				expectObjectToBeDeletedOnWorkerClusters(ctx, rayjob)
 			})

@@ -3049,22 +3049,12 @@ func TestIsAddedCheckWorkload(t *testing.T) {
 				"ClusterQueue1": {
 					Name: "ClusterQueue1",
 					Workloads: map[workload.Reference]*workload.Info{"workload_namespace/workload_name": {
-						Obj: &kueue.Workload{
-							ObjectMeta: metav1.ObjectMeta{
-								Name:      "workload_name",
-								Namespace: "workload_namespace",
-							},
-						},
+						Obj: utiltestingapi.MakeWorkload("workload_name", "workload_namespace").Obj(),
 					}},
 				}},
 			workload: workload.Info{
 				ClusterQueue: "ClusterQueue1",
-				Obj: &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "workload_name",
-						Namespace: "workload_namespace",
-					},
-				},
+				Obj:          utiltestingapi.MakeWorkload("workload_name", "workload_namespace").Obj(),
 			},
 			expected: true,
 		},
@@ -3074,23 +3064,13 @@ func TestIsAddedCheckWorkload(t *testing.T) {
 				"ClusterQueue1": {
 					Name: "ClusterQueue1",
 					Workloads: map[workload.Reference]*workload.Info{"workload_namespace2/workload_name2": {
-						Obj: &kueue.Workload{
-							ObjectMeta: metav1.ObjectMeta{
-								Name:      "workload_name2",
-								Namespace: "workload_namespace2",
-							},
-						},
+						Obj: utiltestingapi.MakeWorkload("workload_name2", "workload_namespace2").Obj(),
 					}},
 				}},
 
 			workload: workload.Info{
 				ClusterQueue: "ClusterQueue1",
-				Obj: &kueue.Workload{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "workload_name",
-						Namespace: "workload_namespace",
-					},
-				},
+				Obj:          utiltestingapi.MakeWorkload("workload_name", "workload_namespace").Obj(),
 			},
 			expected: false,
 		},

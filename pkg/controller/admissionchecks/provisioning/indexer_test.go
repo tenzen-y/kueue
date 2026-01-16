@@ -167,77 +167,32 @@ func TestIndexWorkload(t *testing.T) {
 	}{
 		"no checks": {
 			workloads: []*kueue.Workload{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name",
-					},
-				},
+				utiltestingapi.MakeWorkload("name", "default").Obj(),
 			},
 			filter: client.MatchingFields{WorkloadsWithAdmissionCheckKey: "check"},
 		},
 		"single check, single match": {
 			workloads: []*kueue.Workload{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name2",
-					},
-					Status: kueue.WorkloadStatus{
-						AdmissionChecks: []kueue.AdmissionCheckState{
-							{
-								Name: "check",
-							},
-						},
-					},
-				},
+				utiltestingapi.MakeWorkload("name", "default").Obj(),
+				utiltestingapi.MakeWorkload("name2", "default").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "check"}).
+					Obj(),
 			},
 			filter:   client.MatchingFields{WorkloadsWithAdmissionCheckKey: "check"},
 			wantList: []string{"name2"},
 		},
 		"multiple checks, multiple matches": {
 			workloads: []*kueue.Workload{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name",
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name2",
-					},
-					Status: kueue.WorkloadStatus{
-						AdmissionChecks: []kueue.AdmissionCheckState{
-							{
-								Name: "check",
-							},
-						},
-					},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "name3",
-					},
-					Status: kueue.WorkloadStatus{
-						AdmissionChecks: []kueue.AdmissionCheckState{
-							{
-								Name: "check2",
-							},
-							{
-								Name: "check",
-							},
-						},
-					},
-				},
+				utiltestingapi.MakeWorkload("name", "default").Obj(),
+				utiltestingapi.MakeWorkload("name2", "default").
+					AdmissionCheck(kueue.AdmissionCheckState{Name: "check"}).
+					Obj(),
+				utiltestingapi.MakeWorkload("name3", "default").
+					AdmissionChecks(
+						kueue.AdmissionCheckState{Name: "check2"},
+						kueue.AdmissionCheckState{Name: "check"},
+					).
+					Obj(),
 			},
 			filter:   client.MatchingFields{WorkloadsWithAdmissionCheckKey: "check"},
 			wantList: []string{"name2", "name3"},

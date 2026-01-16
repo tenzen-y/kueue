@@ -825,7 +825,7 @@ func TestStatus(t *testing.T) {
 			wantErr:    nil,
 		},
 		"fake": {
-			queue:      &kueue.LocalQueue{ObjectMeta: metav1.ObjectMeta{Name: "fake"}},
+			queue:      utiltestingapi.MakeLocalQueue("fake", "").Obj(),
 			wantStatus: 0,
 			wantErr:    ErrLocalQueueDoesNotExistOrInactive,
 		},
@@ -1561,26 +1561,10 @@ func TestGetPendingWorkloadsInfo(t *testing.T) {
 			cqName: "cq",
 			wantPendingWorkloadsInfo: []*workload.Info{
 				{
-					Obj: &kueue.Workload{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "a",
-							Namespace: "",
-						},
-						Spec: kueue.WorkloadSpec{
-							QueueName: "foo",
-						},
-					},
+					Obj: utiltestingapi.MakeWorkload("a", "").Queue("foo").Obj(),
 				},
 				{
-					Obj: &kueue.Workload{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "b",
-							Namespace: "",
-						},
-						Spec: kueue.WorkloadSpec{
-							QueueName: "foo",
-						},
-					},
+					Obj: utiltestingapi.MakeWorkload("b", "").Queue("foo").Obj(),
 				},
 			},
 		},
