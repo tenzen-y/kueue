@@ -18,6 +18,7 @@ package tase2e
 
 import (
 	"fmt"
+	"sort"
 
 	kfmpi "github.com/kubeflow/mpi-operator/pkg/apis/kubeflow/v2beta1"
 	kftraining "github.com/kubeflow/training-operator/pkg/apis/kubeflow.org/v1"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	clientutil "sigs.k8s.io/kueue/pkg/util/client"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingmpijob "sigs.k8s.io/kueue/pkg/util/testingjobs/mpijob"
@@ -320,6 +322,204 @@ var _ = ginkgo.Describe("TopologyAwareScheduling for MPIJob", func() {
 			// })
 		})
 	})
+
+	ginkgo.FWhen("Replacing a cordoned node with another and resubmitting an MPIJob", func() {
+		ginkgo.It("Should admit the resubmitted MPIJob after swapping cordoned nodes", func() {
+			const (
+				launcherReplicas = 1
+				workerReplicas   = 3
+			)
+			numPods := launcherReplicas + workerReplicas
+
+			// Step 1: List all TAS nodes and group by block.
+			ginkgo.By("Listing TAS nodes and grouping by block")
+			allNodes := &corev1.NodeList{}
+			gomega.Expect(k8sClient.List(ctx, allNodes, client.HasLabels{tasNodeGroupLabel})).To(gomega.Succeed())
+
+			nodesByBlock := map[string][]string{}
+			nodeToBlock := map[string]string{}
+			for _, n := range allNodes.Items {
+				block := n.Labels[utiltesting.DefaultBlockTopologyLevel]
+				nodesByBlock[block] = append(nodesByBlock[block], n.Name)
+				nodeToBlock[n.Name] = block
+			}
+			for block := range nodesByBlock {
+				sort.Strings(nodesByBlock[block])
+			}
+
+			// Step 2: Pre-cordon the last node (alphabetically) in each block as the potential beta.
+			cordonedPerBlock := map[string]string{}
+			for block, blockNodes := range nodesByBlock {
+				beta := blockNodes[len(blockNodes)-1]
+				cordonNode(beta)
+				cordonedPerBlock[block] = beta
+			}
+
+			// Step 3: Register cleanup to uncordon all modified nodes.
+			var alphaNode string
+			ginkgo.DeferCleanup(func() {
+				for _, nodeName := range cordonedPerBlock {
+					uncordonNode(nodeName)
+				}
+				if alphaNode != "" {
+					uncordonNode(alphaNode)
+				}
+			})
+
+			// Step 4: Submit the first MPIJob.
+			ginkgo.By("Creating the first MPIJob")
+			mpijob1 := testingmpijob.MakeMPIJob("node-replace-mpi-1", ns.Name).
+				Queue(localQueue.Name).
+				RunLauncherAsWorker(true).
+				MPIJobReplicaSpecs(
+					testingmpijob.MPIJobReplicaSpecRequirement{
+						ReplicaType:   kfmpi.MPIReplicaTypeLauncher,
+						ReplicaCount:  launcherReplicas,
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Annotations: map[string]string{
+							kueue.PodSetRequiredTopologyAnnotation: utiltesting.DefaultBlockTopologyLevel,
+							kueue.PodSetGroupName:                  "same-group",
+						},
+						Image: util.GetAgnHostImage(),
+						Args:  util.BehaviorExitFast,
+					},
+					testingmpijob.MPIJobReplicaSpecRequirement{
+						ReplicaType:   kfmpi.MPIReplicaTypeWorker,
+						ReplicaCount:  workerReplicas,
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Annotations: map[string]string{
+							kueue.PodSetRequiredTopologyAnnotation: utiltesting.DefaultBlockTopologyLevel,
+							kueue.PodSetGroupName:                  "same-group",
+						},
+						Image: util.GetAgnHostImage(),
+						Args:  util.BehaviorExitFast,
+					},
+				).
+				RequestAndLimit(kfmpi.MPIReplicaTypeLauncher, corev1.ResourceCPU, "200m").
+				RequestAndLimit(kfmpi.MPIReplicaTypeWorker, extraResource, "1").
+				Obj()
+			util.MustCreate(ctx, k8sClient, mpijob1)
+
+			// Step 5: Wait for the first MPIJob to be admitted and all pods scheduled.
+			ginkgo.By("First MPIJob is unsuspended", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mpijob1), mpijob1)).To(gomega.Succeed())
+					g.Expect(mpijob1.Spec.RunPolicy.Suspend).Should(gomega.Equal(ptr.To(false)))
+				}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			pods := &corev1.PodList{}
+			ginkgo.By("Ensure all first MPIJob pods are created", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.List(ctx, pods, client.InNamespace(ns.Name))).To(gomega.Succeed())
+					g.Expect(pods.Items).Should(gomega.HaveLen(numPods))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Ensure all first MPIJob pods are scheduled", func() {
+				listOpts := &client.ListOptions{
+					FieldSelector: fields.OneTermNotEqualSelector("spec.nodeName", ""),
+				}
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.List(ctx, pods, client.InNamespace(ns.Name), listOpts)).To(gomega.Succeed())
+					g.Expect(pods.Items).Should(gomega.HaveLen(numPods))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			// Step 6: Dynamically determine alpha and beta from actual pod placement.
+			ginkgo.By("Determining alpha and beta nodes from pod scheduling")
+			usedNodes := map[string]bool{}
+			for _, pod := range pods.Items {
+				usedNodes[pod.Spec.NodeName] = true
+			}
+			var chosenBlock string
+			for nodeName := range usedNodes {
+				chosenBlock = nodeToBlock[nodeName]
+				break
+			}
+			betaNode := cordonedPerBlock[chosenBlock]
+			for nodeName := range usedNodes {
+				alphaNode = nodeName
+				break
+			}
+			ginkgo.GinkgoLogr.Info("Dynamic node selection",
+				"alphaNode", alphaNode,
+				"betaNode", betaNode,
+				"chosenBlock", chosenBlock,
+				"usedNodes", fmt.Sprintf("%v", usedNodes),
+			)
+
+			// Step 7: Delete the first MPIJob and wait for full cleanup.
+			ginkgo.By("Deleting the first MPIJob and waiting for cleanup", func() {
+				gomega.Expect(util.DeleteAllMPIJobsInNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
+				util.ExpectAllPodsInNamespaceDeleted(ctx, k8sClient, ns)
+				gomega.Expect(util.DeleteWorkloadsInNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
+			})
+
+			// Step 8: Swap cordoned nodes - cordon alpha, uncordon beta.
+			cordonNode(alphaNode)
+			uncordonNode(betaNode)
+
+			// Step 9: Submit the second MPIJob with the same spec.
+			ginkgo.By("Creating the second MPIJob after node swap")
+			mpijob2 := testingmpijob.MakeMPIJob("node-replace-mpi-2", ns.Name).
+				Queue(localQueue.Name).
+				RunLauncherAsWorker(true).
+				MPIJobReplicaSpecs(
+					testingmpijob.MPIJobReplicaSpecRequirement{
+						ReplicaType:   kfmpi.MPIReplicaTypeLauncher,
+						ReplicaCount:  launcherReplicas,
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Annotations: map[string]string{
+							kueue.PodSetRequiredTopologyAnnotation: utiltesting.DefaultBlockTopologyLevel,
+							kueue.PodSetGroupName:                  "same-group",
+						},
+						Image: util.GetAgnHostImage(),
+						Args:  util.BehaviorExitFast,
+					},
+					testingmpijob.MPIJobReplicaSpecRequirement{
+						ReplicaType:   kfmpi.MPIReplicaTypeWorker,
+						ReplicaCount:  workerReplicas,
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Annotations: map[string]string{
+							kueue.PodSetRequiredTopologyAnnotation: utiltesting.DefaultBlockTopologyLevel,
+							kueue.PodSetGroupName:                  "same-group",
+						},
+						Image: util.GetAgnHostImage(),
+						Args:  util.BehaviorExitFast,
+					},
+				).
+				RequestAndLimit(kfmpi.MPIReplicaTypeLauncher, corev1.ResourceCPU, "200m").
+				RequestAndLimit(kfmpi.MPIReplicaTypeWorker, extraResource, "1").
+				Obj()
+			util.MustCreate(ctx, k8sClient, mpijob2)
+
+			// Step 10: Verify the second MPIJob is admitted after the node swap.
+			ginkgo.By("Second MPIJob is unsuspended", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mpijob2), mpijob2)).To(gomega.Succeed())
+					g.Expect(mpijob2.Spec.RunPolicy.Suspend).Should(gomega.Equal(ptr.To(false)))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Ensure all second MPIJob pods are created", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.List(ctx, pods, client.InNamespace(ns.Name))).To(gomega.Succeed())
+					g.Expect(pods.Items).Should(gomega.HaveLen(numPods))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Ensure all second MPIJob pods are scheduled", func() {
+				listOpts := &client.ListOptions{
+					FieldSelector: fields.OneTermNotEqualSelector("spec.nodeName", ""),
+				}
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.List(ctx, pods, client.InNamespace(ns.Name), listOpts)).To(gomega.Succeed())
+					g.Expect(pods.Items).Should(gomega.HaveLen(numPods))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+		})
+	})
 })
 
 func readRankAssignmentsFromMPIJobPods(pods []corev1.Pod, isPodSetGroupRunLauncherAsWorker bool) map[string]string {
@@ -332,4 +532,38 @@ func readRankAssignmentsFromMPIJobPods(pods []corev1.Pod, isPodSetGroupRunLaunch
 		}
 	}
 	return assignment
+}
+
+func cordonNode(nodeName string) {
+	ginkgo.GinkgoHelper()
+	ginkgo.By(fmt.Sprintf("Cordoning node %s", nodeName))
+	gomega.Eventually(func(g gomega.Gomega) {
+		node := &corev1.Node{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nodeName}, node)).To(gomega.Succeed())
+		if node.Spec.Unschedulable {
+			return
+		}
+		err := clientutil.Patch(ctx, k8sClient, node, func() (bool, error) {
+			node.Spec.Unschedulable = true
+			return true, nil
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	}, util.Timeout, util.Interval).Should(gomega.Succeed())
+}
+
+func uncordonNode(nodeName string) {
+	ginkgo.GinkgoHelper()
+	ginkgo.By(fmt.Sprintf("Uncordoning node %s", nodeName))
+	gomega.Eventually(func(g gomega.Gomega) {
+		node := &corev1.Node{}
+		g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nodeName}, node)).To(gomega.Succeed())
+		if !node.Spec.Unschedulable {
+			return
+		}
+		err := clientutil.Patch(ctx, k8sClient, node, func() (bool, error) {
+			node.Spec.Unschedulable = false
+			return true, nil
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	}, util.Timeout, util.Interval).Should(gomega.Succeed())
 }
