@@ -307,6 +307,13 @@ const (
 	// pr: https://github.com/kubernetes-sigs/kueue/pull/7268#issuecomment-3890609376
 	// Enables the Kubeflow's SparkApplication integration
 	SparkApplicationIntegration featuregate.Feature = "SparkApplicationIntegration"
+
+	// owner: @kshalot
+	//
+	// issue: https://github.com/kubernetes-sigs/kueue/issues/8303
+	// Enables preemption orchestration in MultiKueue worker clusters, preventing
+	// concurrent preemptions causing disruptions to other workloads.
+	MultiKueueOrchestratedPreemption featuregate.Feature = "MultiKueueOrchestratedPreemption"
 )
 
 func init() {
@@ -477,6 +484,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	SparkApplicationIntegration: {
+		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	MultiKueueOrchestratedPreemption: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }

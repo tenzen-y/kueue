@@ -59,7 +59,8 @@ import (
 )
 
 var (
-	realClock = clock.RealClock{}
+	realClock                      = clock.RealClock{}
+	singleClusterPreemptionTimeout = 5 * time.Minute
 )
 
 type wlReconciler struct {
@@ -410,7 +411,12 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 	// - elastic workloads which have been scaled down
 	// - workloads for which workload priority has changed
 	for rem, remWl := range group.remotes {
-		if remWl != nil && !equality.Semantic.DeepEqual(group.local.Spec, remWl.Spec) {
+		if remWl != nil && isRemoteSpecOutOfSync(group.local.Spec, remWl.Spec) {
+			var remotePreemptionGates []kueue.PreemptionGate
+			if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+				remotePreemptionGates = remWl.Spec.PreemptionGates
+			}
+
 			remClient := group.remoteClients[rem]
 
 			updateRemote := false
@@ -429,6 +435,11 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 			}
 
 			if updateRemote {
+				if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+					// Make sure to not overwrite preemption gates which are managed by the worker.
+					remWl.Spec.PreemptionGates = remotePreemptionGates
+				}
+
 				if err := remClient.client.Update(ctx, remWl); err != nil {
 					return reconcile.Result{}, fmt.Errorf("failed to update remote workload: %w", err)
 				}
@@ -503,7 +514,32 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 		}
 	}
 
-	return w.nominateAndSynchronizeWorkers(ctx, group)
+	// 7. Open the preemption gate if applicable
+	var requeueAfterSynchronize time.Duration
+	if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+		remWlName, requeueIn := w.workloadToOpenPreemptionGate(ctx, group)
+		if remWlName != nil {
+			remWl := group.remotes[*remWlName]
+			remClient := group.remoteClients[*remWlName]
+			workload.SetPreemptionGatePosition(remWl, constants.MultiKueuePreemptionGate, kueue.PreemptionGatePositionOpen, metav1.NewTime(w.clock.Now()))
+			if err := remClient.client.Status().Update(ctx, remWl); err != nil {
+				return reconcile.Result{}, fmt.Errorf("failed to update remote workload: %w", err)
+			}
+		}
+		// Ensure there is a reconcile that considers the next preemption gate.
+		requeueAfterSynchronize = requeueIn
+	}
+
+	res, err := w.nominateAndSynchronizeWorkers(ctx, group)
+	if err == nil && (res.RequeueAfter == 0 || requeueAfterSynchronize < res.RequeueAfter) {
+		res.RequeueAfter = requeueAfterSynchronize
+	}
+	return res, err
+}
+
+func isRemoteSpecOutOfSync(local, remote kueue.WorkloadSpec) bool {
+	remote.PreemptionGates = nil
+	return !equality.Semantic.DeepEqual(local, remote)
 }
 
 func (w *wlReconciler) listComponentWorkloads(ctx context.Context, wl *kueue.Workload) (*kueue.WorkloadList, error) {
@@ -640,7 +676,7 @@ func (w *wlReconciler) syncToSingleCluster(ctx context.Context, log klog.Logger,
 	for clusterName, remoteWl := range group.remotes {
 		if clusterName == targetCluster {
 			if remoteWl == nil {
-				clone := cloneForCreate(group.local, group.remoteClients[clusterName].origin)
+				clone := cloneForCreate(group.local, group.remoteClients[clusterName].origin, false)
 				if err := group.remoteClients[clusterName].client.Create(ctx, clone); err != nil {
 					log.V(2).Error(err, "creating remote workload", "cluster", clusterName)
 					errs = append(errs, err)
@@ -742,7 +778,7 @@ func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group 
 	for rem, remoteWl := range group.remotes {
 		if slices.Contains(nominatedWorkers, rem) {
 			if remoteWl == nil {
-				clone := cloneForCreate(group.local, group.remoteClients[rem].origin)
+				clone := cloneForCreate(group.local, group.remoteClients[rem].origin, true)
 				if err := group.remoteClients[rem].client.Create(ctx, clone); err != nil {
 					log.V(2).Error(err, "creating remote object", "remote", rem)
 					errs = append(errs, err)
@@ -990,7 +1026,70 @@ func updateDelayedTopologyRequest(local, remote *kueue.Workload) {
 	}
 }
 
-func cloneForCreate(orig *kueue.Workload, origin string) *kueue.Workload {
+func (w *wlReconciler) workloadToOpenPreemptionGate(ctx context.Context, group *wlGroup) (*string, time.Duration) {
+	log := ctrl.LoggerFrom(ctx).WithValues("op", "workloadToOpenPreemptionGate")
+
+	var previousUngateTime *metav1.Time
+	var oldestPreemptionSignalTime *metav1.Time
+	var workloadToUngateClusterName *string
+
+	for clusterName, wl := range group.remotes {
+		remoteWlLog := log.WithValues("remoteCluster", clusterName, "remoteWorkload", klog.KObj(wl))
+		if wl == nil {
+			continue
+		}
+		openMkGateStateIdx := slices.IndexFunc(wl.Status.PreemptionGates, func(gate kueue.PreemptionGateState) bool {
+			return gate.Name == constants.MultiKueuePreemptionGate && gate.Position == kueue.PreemptionGatePositionOpen
+		})
+		if openMkGateStateIdx == -1 {
+			remoteWlLog.V(4).Info("Remote workload does not have an open preemption gate")
+			preemptionSignalCond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadBlockedOnPreemptionGates)
+			wlRequiresPreemption := preemptionSignalCond != nil && preemptionSignalCond.Status == metav1.ConditionTrue
+			if !wlRequiresPreemption {
+				remoteWlLog.V(4).Info("Remote workload does not require preemption")
+				continue
+			}
+			wlHasOlderPreemptionSignal := oldestPreemptionSignalTime == nil || preemptionSignalCond.LastTransitionTime.Before(oldestPreemptionSignalTime)
+			if !wlHasOlderPreemptionSignal {
+				remoteWlLog.V(4).Info("Remote workload was not the first to require preemption")
+				continue
+			}
+
+			remoteWlLog.V(4).Info("Remote workload is the new candidate for ungating")
+			workloadToUngateClusterName = &clusterName
+			oldestPreemptionSignalTime = &preemptionSignalCond.LastTransitionTime
+		} else {
+			remoteWlLog.V(4).Info("Remote workload has an open preemption gate")
+			openMkGateState := wl.Status.PreemptionGates[openMkGateStateIdx]
+			gateOpenedTime := openMkGateState.LastTransitionTime
+			if previousUngateTime == nil || gateOpenedTime.After(previousUngateTime.Time) {
+				remoteWlLog.V(4).Info("Remote workload has the new latest preemption ungating time")
+				previousUngateTime = &gateOpenedTime
+			}
+		}
+	}
+
+	var timeSinceUngate time.Duration
+	if previousUngateTime == nil {
+		timeSinceUngate = 0
+	} else {
+		timeSinceUngate = w.clock.Now().Sub(previousUngateTime.Time)
+	}
+	timeLeftInTimeout := singleClusterPreemptionTimeout - timeSinceUngate
+
+	if workloadToUngateClusterName == nil {
+		log.V(4).Info("No candidate workload found for ungating preemptions")
+		return nil, 0
+	}
+	if previousUngateTime != nil && timeLeftInTimeout > 0 {
+		log.V(4).Info("Single preemption timeout did not expire", "timeLeft", timeLeftInTimeout, "nextRemoteToUngate", workloadToUngateClusterName)
+		return nil, timeLeftInTimeout
+	}
+	log.V(4).Info("Found workload to ungate", "remoteToUngate", workloadToUngateClusterName)
+	return workloadToUngateClusterName, singleClusterPreemptionTimeout
+}
+
+func cloneForCreate(orig *kueue.Workload, origin string, preemptionGated bool) *kueue.Workload {
 	remoteWl := &kueue.Workload{}
 	remoteWl.ObjectMeta = api.CloneObjectMetaForCreation(&orig.ObjectMeta)
 	if remoteWl.Labels == nil {
@@ -998,5 +1097,11 @@ func cloneForCreate(orig *kueue.Workload, origin string) *kueue.Workload {
 	}
 	remoteWl.Labels[kueue.MultiKueueOriginLabel] = origin
 	orig.Spec.DeepCopyInto(&remoteWl.Spec)
+
+	if features.Enabled(features.MultiKueueOrchestratedPreemption) && preemptionGated {
+		mkPreemptionGate := kueue.PreemptionGate{Name: constants.MultiKueuePreemptionGate}
+		remoteWl.Spec.PreemptionGates = append(remoteWl.Spec.PreemptionGates, mkPreemptionGate)
+	}
+
 	return remoteWl
 }
