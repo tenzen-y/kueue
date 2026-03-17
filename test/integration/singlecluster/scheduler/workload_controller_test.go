@@ -17,6 +17,8 @@ limitations under the License.
 package scheduler
 
 import (
+	"fmt"
+
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -27,6 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/constants"
+	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/slices"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
@@ -824,6 +828,71 @@ var _ = ginkgo.Describe("Workload controller with scheduler", func() {
 					gomega.Expect(k8sClient.Delete(ctx, wl)).To(gomega.Succeed())
 				})
 			})
+		})
+	})
+
+	ginkgo.When("Workload has AdmissionGatedBy annotation", func() {
+		var (
+			flavor       *kueue.ResourceFlavor
+			clusterQueue *kueue.ClusterQueue
+			localQueue   *kueue.LocalQueue
+		)
+
+		ginkgo.BeforeEach(func() {
+			flavor = utiltestingapi.MakeResourceFlavor("default").Obj()
+			util.MustCreate(ctx, k8sClient, flavor)
+
+			clusterQueue = utiltestingapi.MakeClusterQueue("cluster-queue").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas(flavor.Name).Resource(corev1.ResourceCPU, "5").Obj()).
+				Obj()
+			util.CreateClusterQueuesAndWaitForActive(ctx, k8sClient, clusterQueue)
+
+			localQueue = utiltestingapi.MakeLocalQueue("local-queue", ns.Name).ClusterQueue(clusterQueue.Name).Obj()
+			util.CreateLocalQueuesAndWaitForActive(ctx, k8sClient, localQueue)
+		})
+
+		ginkgo.AfterEach(func() {
+			gomega.Expect(util.DeleteNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, localQueue, true)
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, clusterQueue, true)
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, flavor, true)
+		})
+
+		ginkgo.It("Should set QuotaReserved condition and emit events when gated and ungated", func() {
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.AdmissionGatedBy, true)
+
+			gateValue := "example.com/controller1"
+
+			ginkgo.By("Creating a workload with admission gate annotation")
+			wl := utiltestingapi.MakeWorkload("gated-wl", ns.Name).
+				Queue(kueue.LocalQueueName(localQueue.Name)).
+				Annotation(constants.AdmissionGatedByAnnotation, gateValue).
+				Request(corev1.ResourceCPU, "1").
+				Obj()
+			util.MustCreate(ctx, k8sClient, wl)
+
+			createdWorkload := &kueue.Workload{}
+
+			ginkgo.By("Verifying the workload controller sets the QuotaReserved condition to AdmissionGated")
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), createdWorkload)).Should(gomega.Succeed())
+				g.Expect(createdWorkload.Status.Conditions).To(gomega.ContainElement(
+					gomega.BeComparableTo(metav1.Condition{
+						Type:    kueue.WorkloadQuotaReserved,
+						Status:  metav1.ConditionFalse,
+						Reason:  kueue.WorkloadAdmissionGated,
+						Message: fmt.Sprintf("Admission is gated by: %s", gateValue),
+					}, util.IgnoreConditionTimestampsAndObservedGeneration),
+				))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+			ginkgo.By("Removing the annotation causes the workload to be admitted")
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), createdWorkload)).Should(gomega.Succeed())
+				delete(createdWorkload.Annotations, constants.AdmissionGatedByAnnotation)
+				g.Expect(k8sClient.Update(ctx, createdWorkload)).Should(gomega.Succeed())
+				util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, createdWorkload)
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 		})
 	})
 })

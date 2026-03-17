@@ -45,6 +45,7 @@ import (
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	mocks "sigs.k8s.io/kueue/internal/mocks/controller/jobframework"
+	kueueconstants "sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/job"
@@ -87,11 +88,13 @@ func TestReconcileGenericJob(t *testing.T) {
 
 	testCases := map[string]struct {
 		elasticJobsViaWorkloadSlicesEnabled bool
+		admissionGatedByEnabled             bool
 		req                                 types.NamespacedName
 		job                                 *batchv1.Job
 		podSets                             []kueue.PodSet
 		objs                                []client.Object
 		wantWorkloads                       []kueue.Workload
+		wantEvents                          []utiltesting.EventRecord
 	}{
 		"handle job with no workload (elasticJobsViaWorkloadSlicesEnabled = false)": {
 			elasticJobsViaWorkloadSlicesEnabled: false,
@@ -206,10 +209,131 @@ func TestReconcileGenericJob(t *testing.T) {
 					Obj(),
 			},
 		},
+		"job with AdmissionGatedBy annotation should create workload with annotation": {
+			admissionGatedByEnabled: true,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Obj(),
+			podSets: basePodSets,
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().
+					Name("job-test-job-ce737").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+		},
+		"job with AdmissionGatedBy annotation removed should update workload": {
+			admissionGatedByEnabled: true,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				Obj(),
+			podSets: basePodSets,
+			objs: []client.Object{
+				baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().Name("job-test-job-1").ResourceVersion("2").Obj(),
+			},
+		},
+		"job with multiple AdmissionGatedBy gates should create workload with annotation": {
+			admissionGatedByEnabled: true,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+				Obj(),
+			podSets: basePodSets,
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().
+					Name("job-test-job-ce737").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+					Obj(),
+			},
+		},
+		"job with AdmissionGatedBy annotation when feature gate disabled should not propagate annotation": {
+			admissionGatedByEnabled: false,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Obj(),
+			podSets: basePodSets,
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().
+					Name("job-test-job-ce737").
+					Obj(),
+			},
+		},
+		"job with AdmissionGatedBy annotation unchanged should not emit event": {
+			admissionGatedByEnabled: true,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Obj(),
+			podSets: basePodSets,
+			objs: []client.Object{
+				baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantEvents: nil,
+		},
+		"job with AdmissionGatedBy annotation changed should emit event": {
+			admissionGatedByEnabled: true,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+				Obj(),
+			podSets: basePodSets,
+			objs: []client.Object{
+				baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().Name("job-test-job-1").ResourceVersion("2").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+					Obj(),
+			},
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Name: testJobName, Namespace: metav1.NamespaceDefault},
+					EventType: corev1.EventTypeNormal,
+					Reason:    ReasonUpdatedWorkload,
+					Message:   `Updated workload AdmissionGatedBy to "example.com/controller1,example.com/controller2"`,
+				},
+			},
+		},
+		"job with AdmissionGatedBy annotation changed when feature disabled should not emit event": {
+			admissionGatedByEnabled: false,
+			req:                     baseReq,
+			job: baseJob.Clone().
+				SetAnnotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+				Obj(),
+			podSets: basePodSets,
+			objs: []client.Object{
+				baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantWorkloads: []kueue.Workload{
+				*baseWl.Clone().Name("job-test-job-1").
+					Annotation(kueueconstants.AdmissionGatedByAnnotation, "example.com/controller1").
+					Obj(),
+			},
+			wantEvents: nil,
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, tc.elasticJobsViaWorkloadSlicesEnabled)
+			features.SetFeatureGateDuringTest(t, features.AdmissionGatedBy, tc.admissionGatedByEnabled)
 
 			ctx, _ := utiltesting.ContextWithLog(t)
 			mockctrl := gomock.NewController(t)
@@ -244,6 +368,13 @@ func TestReconcileGenericJob(t *testing.T) {
 
 			if diff := cmp.Diff(wls.Items, tc.wantWorkloads, cmpopts.IgnoreFields(corev1.ResourceRequirements{}, "Requests")); diff != "" {
 				t.Errorf("Workloads mismatch (-want +got):\n%s", diff)
+			}
+
+			// Only check events if wantEvents is explicitly set in the test case
+			if tc.wantEvents != nil {
+				if diff := cmp.Diff(tc.wantEvents, recorder.RecordedEvents); diff != "" {
+					t.Errorf("Unexpected events (-want +got):\n%s", diff)
+				}
 			}
 		})
 	}

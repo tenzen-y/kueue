@@ -1003,12 +1003,77 @@ func (r *JobReconciler) ensureOneWorkload(ctx context.Context, job GenericJob, o
 	}
 
 	if match != nil {
+		if features.Enabled(features.AdmissionGatedBy) {
+			if err := UpdateAdmissionGatedBy(ctx, r.client, r.record, job.Object(), match); err != nil {
+				return nil, err
+			}
+		}
+
 		if err := UpdateWorkloadPriority(ctx, r.client, r.record, job.Object(), match, getCustomPriorityClassFuncFromJob(job)); err != nil {
 			return nil, err
 		}
 	}
 
 	return match, nil
+}
+
+// UpdateAdmissionGatedBy propagates the AdmissionGatedBy annotation from the job object
+// to its associated workload. Emits an event only if the annotation was actually changed
+// and the update succeeded.
+// The function returnes immediately if the AdmissionGatedBy feature is not enabled.
+func UpdateAdmissionGatedBy(ctx context.Context, c client.Client, r record.EventRecorder, obj client.Object, wl *kueue.Workload) error {
+	if !features.Enabled(features.AdmissionGatedBy) {
+		return nil
+	}
+
+	var propagated bool
+	if err := clientutil.Patch(ctx, c, wl, func() (bool, error) {
+		propagated = PropagateAdmissionGatedByAnnotation(obj, wl)
+		return propagated, nil
+	}); err != nil {
+		return fmt.Errorf("updating the AdmissionGatedBy of existing workload: %w", err)
+	}
+
+	if propagated {
+		r.Eventf(obj,
+			corev1.EventTypeNormal, ReasonUpdatedWorkload,
+			"Updated workload AdmissionGatedBy to %q", obj.GetAnnotations()[constants.AdmissionGatedByAnnotation],
+		)
+	}
+
+	return nil
+}
+
+// PropagateAdmissionGatedByAnnotation copies the AdmissionGatedBy annotation from the given object to
+// workload object but only in memory. It does not persist the changes to the API server.
+func PropagateAdmissionGatedByAnnotation(obj client.Object, wl *kueue.Workload) bool {
+	if !features.Enabled(features.AdmissionGatedBy) {
+		return false
+	}
+
+	jobGateValue := ""
+	if val, exists := obj.GetAnnotations()[constants.AdmissionGatedByAnnotation]; exists {
+		jobGateValue = val
+	}
+
+	wlGateValue := ""
+	if val, exists := wl.Annotations[constants.AdmissionGatedByAnnotation]; exists {
+		wlGateValue = val
+	}
+
+	if jobGateValue != wlGateValue {
+		if wl.Annotations == nil {
+			wl.Annotations = make(map[string]string)
+		}
+		if jobGateValue == "" {
+			delete(wl.Annotations, constants.AdmissionGatedByAnnotation)
+		} else {
+			wl.Annotations[constants.AdmissionGatedByAnnotation] = jobGateValue
+		}
+		return true
+	}
+
+	return false
 }
 
 // UpdateWorkloadPriority updates workload priority if object's kueue.x-k8s.io/priority-class label changed.
@@ -1392,10 +1457,15 @@ func PrepareWorkloadPriority(ctx context.Context, c client.Client, obj client.Ob
 	return nil
 }
 
-// prepareWorkload adds the priority information for the constructed workload
+// prepareWorkload adds the priority information for the constructed workload and
+// the AdmissionGatedBy annotation when the feature is on.
 // active is used to set the active field of the workload. If active is nil, the workload will be set to active by default.
 // for the existing workload, the original active status should be retained.
 func (r *JobReconciler) prepareWorkload(ctx context.Context, job GenericJob, wl *kueue.Workload, active *bool) error {
+	if features.Enabled(features.AdmissionGatedBy) {
+		PropagateAdmissionGatedByAnnotation(job.Object(), wl)
+	}
+
 	if err := PrepareWorkloadPriority(ctx, r.client, job.Object(), wl, getCustomPriorityClassFuncFromJob(job)); err != nil {
 		return err
 	}

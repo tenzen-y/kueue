@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/priority"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	utilslices "sigs.k8s.io/kueue/pkg/util/slices"
+	"sigs.k8s.io/kueue/pkg/util/webhook"
 	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
@@ -123,6 +124,10 @@ func ValidateWorkload(obj *kueue.Workload) field.ErrorList {
 	allErrs = append(allErrs, metav1validation.ValidateConditions(obj.Status.Conditions, statusPath.Child("conditions"))...)
 	allErrs = append(allErrs, validateReclaimablePods(obj, statusPath.Child("reclaimablePods"))...)
 	allErrs = append(allErrs, validateAdmissionChecks(obj, statusPath.Child("admissionChecks"))...)
+
+	if features.Enabled(features.AdmissionGatedBy) {
+		allErrs = append(allErrs, webhook.ValidateAdmissionGatedByAnnotationOnCreate(obj)...)
+	}
 
 	// KEP-7990: when priority-boost annotation is set, it must be a valid signed integer; invalid values cause rejection.
 	// Missing key is valid (treated as 0). If the key is present, the value must not be empty; use "0" explicitly.
@@ -297,6 +302,11 @@ func ValidateWorkloadUpdate(newObj, oldObj *kueue.Workload) field.ErrorList {
 	allErrs = append(allErrs, validateAdmissionUpdate(newObj.Status.Admission, oldObj.Status.Admission, field.NewPath("status", "admission"))...)
 	allErrs = append(allErrs, validateImmutablePodSetUpdates(newObj, oldObj, statusPath.Child("admissionChecks"))...)
 	allErrs = append(allErrs, validateClusterNameUpdate(newObj, oldObj, statusPath)...)
+
+	if features.Enabled(features.AdmissionGatedBy) {
+		allErrs = append(allErrs, webhook.ValidateAdmissionGatedByAnnotationOnUpdate(oldObj, newObj)...)
+	}
+
 	return allErrs
 }
 

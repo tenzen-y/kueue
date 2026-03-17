@@ -52,6 +52,7 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/dra"
 	"sigs.k8s.io/kueue/pkg/features"
@@ -456,6 +457,12 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}))
 	}
 
+	if features.Enabled(features.AdmissionGatedBy) {
+		if conditionUpdated, err := r.mayUpdateConditionForAdmissionGatedBy(ctx, &wl); conditionUpdated || err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	cqName, cqOk := r.queues.ClusterQueueForWorkload(&wl)
 	if cqOk {
 		// because we need to react to API cluster cq events, the list of checks from a cache can lead to race conditions
@@ -809,6 +816,55 @@ func (r *WorkloadReconciler) reconcileOnClusterQueueActiveState(ctx context.Cont
 	}
 
 	return false, nil
+}
+
+// mayUpdateConditionForAdmissionGatedBy updates the Condition of a Workload when it first detects that it is
+// gated by an AdmissionGate or it detects that its AdmissionGate just got removed.
+// Returns whether the function updated the condition or not.
+// Returns error if the condition update fails.
+// The function also emits Events after it successfully updates the Condition
+func (r *WorkloadReconciler) mayUpdateConditionForAdmissionGatedBy(ctx context.Context, wl *kueue.Workload) (bool, error) {
+	if !features.Enabled(features.AdmissionGatedBy) {
+		return false, nil
+	}
+
+	hasGatedAnnotation := workload.HasAdmissionGate(wl)
+	hasGatedCondition := hasAdmissionGatedCondition(wl)
+
+	if !hasGatedAnnotation && hasGatedCondition {
+		// This previously gated workload is becoming admissible because its AdmissionGatedBy annotation is cleared
+		err := workload.PatchAdmissionStatus(ctx, r.client, wl, r.clock, func(wl *kueue.Workload) (bool, error) {
+			// Update the condition to indicate the gate is cleared, rather than removing it
+			return workload.UnsetQuotaReservationWithCondition(wl, "Pending", "AdmissionGatedBy cleared, waiting for quota reservation", r.clock.Now()), nil
+		})
+		if err != nil {
+			return false, err
+		}
+		r.recorder.Eventf(wl, corev1.EventTypeNormal, "AdmissionGateCleared",
+			"Admission gate cleared, workload is now admissible")
+		return true, nil
+	} else if hasGatedAnnotation && !hasGatedCondition {
+		// This is the first detection we see a non-empty AdmissionGatedBy annotation
+		err := workload.PatchAdmissionStatus(ctx, r.client, wl, r.clock, func(wl *kueue.Workload) (bool, error) {
+			return workload.UnsetQuotaReservationWithCondition(wl, kueue.WorkloadAdmissionGated, fmt.Sprintf("Admission is gated by: %s", wl.Annotations[constants.AdmissionGatedByAnnotation]), r.clock.Now()), nil
+		})
+		if err != nil {
+			return false, err
+		}
+		r.recorder.Eventf(wl, corev1.EventTypeNormal, "AdmissionGated",
+			"Workload admission is gated by: %s", wl.Annotations[constants.AdmissionGatedByAnnotation])
+
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// hasAdmissionGatedCondition returns true if the workload has a QuotaReserved
+// condition with reason AdmissionGated.
+func hasAdmissionGatedCondition(wl *kueue.Workload) bool {
+	condition := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadQuotaReserved)
+	return condition != nil && condition.Reason == kueue.WorkloadAdmissionGated
 }
 
 func syncAdmissionCheckConditions(conds []kueue.AdmissionCheckState, admissionChecks sets.Set[kueue.AdmissionCheckReference], c clock.Clock) ([]kueue.AdmissionCheckState, bool) {

@@ -29,6 +29,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/constants"
 	controllerconstants "sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/tas"
@@ -287,6 +288,126 @@ func TestValidateWorkload(t *testing.T) {
 				Obj(),
 			wantErr: nil,
 		},
+		"valid AdmissionGatedBy annotation with single gate": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"valid AdmissionGatedBy annotation with multiple gates": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/a,not.example.com/b",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"AdmissionGatedBy annotation - leading space": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: " example.com/gate",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"AdmissionGatedBy annotation - space before comma": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/gate ,example.com/gate2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"AdmissionGatedBy annotation - space after comma": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/gate, example.com/gate2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"AdmissionGatedBy annotation - trailing space": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/gate ",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"invalid AdmissionGatedBy annotation - not in subdomain/path format": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "this is an invalid value",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), "this is an invalid value", ""),
+			},
+		},
+		"invalid AdmissionGatedBy annotation - duplicate gates": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "duplicates.are/invalid,duplicates.are/invalid",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), "duplicates.are/invalid,duplicates.are/invalid", ""),
+			},
+		},
+		"invalid AdmissionGatedBy annotation - space in path component": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/gate name",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), "example.com/gate name", ""),
+			},
+		},
+		"invalid AdmissionGatedBy annotation - space in domain component": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example .com/gate",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), "example .com/gate", ""),
+			},
+		},
+		"invalid AdmissionGatedBy annotation - multiple gates with one containing space": {
+			featureGates: map[featuregate.Feature]bool{features.AdmissionGatedBy: true},
+			workload: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "valid.com/gate,invalid gate.com/controller",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Invalid(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), "valid.com/gate,invalid gate.com/controller", ""),
+			},
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -306,6 +427,7 @@ func TestValidateWorkloadUpdate(t *testing.T) {
 	testCases := map[string]struct {
 		enableTopologyAwareScheduling bool
 		enableElasticJobsFeature      bool
+		enableAdmissionGatedBy        bool
 
 		before, after *kueue.Workload
 		wantErr       field.ErrorList
@@ -620,9 +742,101 @@ func TestValidateWorkloadUpdate(t *testing.T) {
 				Annotation(workloadslicing.WorkloadSliceReplacementFor, string(workload.NewReference(testWorkloadNamespace, testWorkloadName))).
 				Obj(),
 		},
+		"reject adding AdmissionGatedBy annotation after workload creation": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Forbidden(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), ""),
+			},
+		},
+		"allow removing AdmissionGatedBy annotation with single gate": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller1",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"allow removing AdmissionGatedBy annotation with multiple gates": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller1,example.com/controller2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"allow removing one gate from AdmissionGatedBy annotation": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller1,example.com/controller2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
+		"reject injecting new gate in AdmissionGatedBy annotation": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller1,example.com/controller2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller3",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: field.ErrorList{
+				field.Forbidden(field.NewPath("metadata", "annotations").Key(constants.AdmissionGatedByAnnotation), ""),
+			},
+		},
+		"allow reordering gates in AdmissionGatedBy annotation": {
+			enableAdmissionGatedBy: true,
+			before: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller1,example.com/controller2",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			after: utiltestingapi.MakeWorkload(testWorkloadName, testWorkloadNamespace).
+				Annotations(map[string]string{
+					constants.AdmissionGatedByAnnotation: "example.com/controller2,example.com/controller1",
+				}).
+				PodSets(*utiltestingapi.MakePodSet("main", 1).Obj()).
+				Obj(),
+			wantErr: nil,
+		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.AdmissionGatedBy, tc.enableAdmissionGatedBy)
 			features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, tc.enableElasticJobsFeature)
 			features.SetFeatureGateDuringTest(t, features.TopologyAwareScheduling, tc.enableTopologyAwareScheduling)
 			errList := ValidateWorkloadUpdate(tc.after, tc.before)
