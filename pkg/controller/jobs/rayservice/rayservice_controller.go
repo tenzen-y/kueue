@@ -115,6 +115,7 @@ func (r *rayServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 type RayService rayv1.RayService
 
 var _ jobframework.GenericJob = (*RayService)(nil)
+var _ jobframework.JobWithCustomAnnotations = (*RayService)(nil)
 
 func (j *RayService) Object() client.Object {
 	return (*rayv1.RayService)(j)
@@ -196,6 +197,10 @@ func (j *RayService) Finished(ctx context.Context) (message string, success, fin
 
 func (j *RayService) PodsReady(ctx context.Context) bool {
 	return meta.IsStatusConditionTrue(j.Status.Conditions, string(rayv1.RayServiceReady))
+}
+
+func (j *RayService) GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error) {
+	return jobframework.GetWorkloadslicingCustomAnnotations(j.Object(), podSets)
 }
 
 func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {
