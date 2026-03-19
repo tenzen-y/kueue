@@ -63,6 +63,7 @@ import (
 	podconstants "sigs.k8s.io/kueue/pkg/controller/jobs/pod/constants"
 	workloadraycluster "sigs.k8s.io/kueue/pkg/controller/jobs/raycluster"
 	workloadrayjob "sigs.k8s.io/kueue/pkg/controller/jobs/rayjob"
+	workloadrayservice "sigs.k8s.io/kueue/pkg/controller/jobs/rayservice"
 	workloadstatefulset "sigs.k8s.io/kueue/pkg/controller/jobs/statefulset"
 	workloadtrainjob "sigs.k8s.io/kueue/pkg/controller/jobs/trainjob"
 	"sigs.k8s.io/kueue/pkg/features"
@@ -80,6 +81,7 @@ import (
 	testingpytorchjob "sigs.k8s.io/kueue/pkg/util/testingjobs/pytorchjob"
 	testingraycluster "sigs.k8s.io/kueue/pkg/util/testingjobs/raycluster"
 	testingrayjob "sigs.k8s.io/kueue/pkg/util/testingjobs/rayjob"
+	testingrayservice "sigs.k8s.io/kueue/pkg/util/testingjobs/rayservice"
 	testingstatefulset "sigs.k8s.io/kueue/pkg/util/testingjobs/statefulset"
 	testingtrainjob "sigs.k8s.io/kueue/pkg/util/testingjobs/trainjob"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -216,6 +218,17 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 	})
 
 	ginkgo.AfterEach(func() {
+		// Clean up resources created by the RayService test on all clusters.
+		rayServiceConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rayservice-hello", Namespace: managerNs.Name}}
+		gomega.Expect(client.IgnoreNotFound(k8sManagerClient.Delete(ctx, rayServiceConfigMap))).To(gomega.Succeed())
+		gomega.Expect(client.IgnoreNotFound(k8sWorker1Client.Delete(ctx, rayServiceConfigMap.DeepCopy()))).To(gomega.Succeed())
+		gomega.Expect(client.IgnoreNotFound(k8sWorker2Client.Delete(ctx, rayServiceConfigMap.DeepCopy()))).To(gomega.Succeed())
+
+		rayService := &rayv1.RayService{ObjectMeta: metav1.ObjectMeta{Name: "rayservice1", Namespace: managerNs.Name}}
+		gomega.Expect(client.IgnoreNotFound(k8sManagerClient.Delete(ctx, rayService))).To(gomega.Succeed())
+		gomega.Expect(client.IgnoreNotFound(k8sWorker1Client.Delete(ctx, rayService.DeepCopy()))).To(gomega.Succeed())
+		gomega.Expect(client.IgnoreNotFound(k8sWorker2Client.Delete(ctx, rayService.DeepCopy()))).To(gomega.Succeed())
+
 		gomega.Expect(util.DeleteNamespace(ctx, k8sManagerClient, managerNs)).To(gomega.Succeed())
 		gomega.Expect(util.DeleteNamespace(ctx, k8sWorker1Client, worker1Ns)).To(gomega.Succeed())
 		gomega.Expect(util.DeleteNamespace(ctx, k8sWorker2Client, worker2Ns)).To(gomega.Succeed())
@@ -1510,6 +1523,117 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 					g.Expect(createdRayCluster.Status.DesiredWorkerReplicas).To(gomega.Equal(int32(1)))
 					g.Expect(createdRayCluster.Status.ReadyWorkerReplicas).To(gomega.Equal(int32(1)))
 					g.Expect(createdRayCluster.Status.AvailableWorkerReplicas).To(gomega.Equal(int32(1)))
+				}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+		})
+
+		ginkgo.It("Should run a RayService on worker if admitted", func() {
+			kuberayTestImage := util.GetKuberayTestImage()
+
+			// Create ConfigMap with a simple Ray Serve application
+			configMap := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "rayservice-hello",
+					Namespace: managerNs.Name,
+				},
+				Data: map[string]string{
+					"hello_serve.py": `from ray import serve
+
+@serve.deployment
+class HelloWorld:
+    def __call__(self, request):
+        return "Hello, World!"
+
+app = HelloWorld.bind()`,
+				},
+			}
+
+			serveConfigV2 := `applications:
+  - name: hello_app
+    import_path: hello_serve:app
+    route_prefix: /
+    deployments:
+      - name: HelloWorld
+        num_replicas: 1
+        max_replicas_per_node: 1
+        ray_actor_options:
+          num_cpus: 0.2`
+
+			volumes := []corev1.Volume{
+				{
+					Name: "code-sample",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "rayservice-hello",
+							},
+							Items: []corev1.KeyToPath{
+								{
+									Key:  "hello_serve.py",
+									Path: "hello_serve.py",
+								},
+							},
+						},
+					},
+				},
+			}
+			volumeMounts := []corev1.VolumeMount{
+				{
+					Name:      "code-sample",
+					MountPath: "/home/ray/samples",
+				},
+			}
+			env := []corev1.EnvVar{
+				{
+					Name:  "PYTHONPATH",
+					Value: "/home/ray/samples:$PYTHONPATH",
+				},
+			}
+
+			// Since it requires 1.5 CPU, this service can only be admitted in worker 1.
+			rayService := testingrayservice.MakeService("rayservice1", managerNs.Name).
+				Suspend(true).
+				Queue(managerLq.Name).
+				RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "1").
+				RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "0.5").
+				Image(rayv1.HeadNode, kuberayTestImage).
+				Image(rayv1.WorkerNode, kuberayTestImage).
+				RayStartParam(rayv1.HeadNode, "object-store-memory", "100000000").
+				WithServeConfigV2(serveConfigV2).
+				Env(rayv1.HeadNode, env).
+				Env(rayv1.WorkerNode, env).
+				Volumes(rayv1.HeadNode, volumes).
+				Volumes(rayv1.WorkerNode, volumes).
+				VolumeMounts(rayv1.HeadNode, volumeMounts).
+				VolumeMounts(rayv1.WorkerNode, volumeMounts).
+				Obj()
+
+			rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].GroupName = "small-group"
+			rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].MinReplicas = ptr.To[int32](1)
+			rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].MaxReplicas = ptr.To[int32](2)
+
+			ginkgo.By("Creating the ConfigMap on all clusters", func() {
+				worker1ConfigMap := configMap.DeepCopy()
+				worker2ConfigMap := configMap.DeepCopy()
+				util.MustCreate(ctx, k8sManagerClient, configMap)
+				util.MustCreate(ctx, k8sWorker1Client, worker1ConfigMap)
+				util.MustCreate(ctx, k8sWorker2Client, worker2ConfigMap)
+			})
+
+			ginkgo.By("Creating the RayService", func() {
+				util.MustCreate(ctx, k8sManagerClient, rayService)
+			})
+
+			wlLookupKey := types.NamespacedName{Name: workloadrayservice.GetWorkloadNameForRayService(rayService.Name, rayService.UID), Namespace: managerNs.Name}
+			// the execution should be given to the worker1
+			waitForJobAdmitted(wlLookupKey, multiKueueAc.Name, "worker1")
+
+			ginkgo.By("Checking the RayService is running", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					createdRayService := &rayv1.RayService{}
+					g.Expect(k8sManagerClient.Get(ctx, client.ObjectKeyFromObject(rayService), createdRayService)).To(gomega.Succeed())
+					g.Expect(createdRayService.Spec.RayClusterSpec.Suspend).To(gomega.Equal(ptr.To(false)))
+					g.Expect(apimeta.IsStatusConditionTrue(createdRayService.Status.Conditions, string(rayv1.RayServiceReady))).To(gomega.BeTrue())
 				}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
 			})
 		})
