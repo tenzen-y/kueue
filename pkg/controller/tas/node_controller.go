@@ -67,7 +67,7 @@ const (
 
 	podTerminatedByKueueConditionType    = "TerminatedByKueue"
 	podTerminatedByKueueConditionReason  = "UnschedulableOnAssignedNode"
-	podTerminatedByKueueConditionMessage = "Pod terminated by Kueue NodeFailureController due to node taint"
+	podTerminatedByKueueConditionMessage = "Pod terminated by Kueue NodeController due to node taint"
 	podTerminatedByKueueEventReason      = "PodTerminatedByKueue"
 )
 

@@ -297,9 +297,9 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 			})
 
 			// In this test we use a job with SliceSize = 2 and SliceRequiredTopology = Rack
-			// Each pod requires 1 "extraResource" so the jobSet will use both nodes from a Rack.
+			// Each pod requires 1 "extraResource" so the job will use both nodes from a Rack.
 			// We simulate a node failure by tainting it with NoExecute.
-			// The replacement mechanism seeks a replacement within the same Rack, but fails as no implementation is available.
+			// The replacement mechanism seeks a replacement within the same Rack, but fails as no replacement is available.
 			// Consequently, the workload is evicted and rescheduled to a different Rack.
 			ginkgo.It("Should evict the workload if replacement is not possible due to taint", func() {
 				parallelism := 2
@@ -380,7 +380,7 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 				})
 			})
 
-			// In this test we use a job with SliceSize = 3 and SliceRequiredTopology = Block
+			// In this test we use a job with RequiredTopology = Block.
 			// Each pod requires 1 "extraResource" so the job will use three nodes from a Block.
 			// We simulate a node failure by tainting it with NoExecute. The pod has a toleration for 0 seconds.
 			// The replacement mechanism should find the available node in the same Block and replace the tainted one.
@@ -398,9 +398,7 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 					Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletionFailOnExit).
 					RequestAndLimit(corev1.ResourceCPU, "200m").
 					RequestAndLimit(extraResource, "1").
-					PodAnnotation(kueue.PodSetPreferredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceSizeAnnotation, "3").
+					PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
 					CompletionMode(batchv1.IndexedCompletion).
 					BackoffLimit(1).
 					Toleration(corev1.Toleration{
@@ -472,7 +470,7 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 				})
 			})
 
-			// In this test we use a job with SliceSize = 3 and SliceRequiredTopology = Block.
+			// In this test we use a job with RequiredTopology = Block.
 			// Each pod requires 1 "extraResource" so the job will use three nodes from a Block.
 			// We simulate a node failure by making it NotReady while the pods are Pending (gated).
 			// The NodeController should identify the pending pods assigned to the failed node and terminate them.
@@ -495,9 +493,7 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 					Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletionFailOnExit).
 					RequestAndLimit(corev1.ResourceCPU, "200m").
 					RequestAndLimit(extraResource, "1").
-					PodAnnotation(kueue.PodSetPreferredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceSizeAnnotation, "3").
+					PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
 					CompletionMode(batchv1.IndexedCompletion).
 					BackoffLimit(1).
 					SchedulingGate(artificialGate).
@@ -634,9 +630,7 @@ var _ = ginkgo.Describe("Hotswap for Topology Aware Scheduling", ginkgo.Ordered,
 					Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletionFailOnExit).
 					RequestAndLimit(corev1.ResourceCPU, "200m").
 					RequestAndLimit(extraResource, "1").
-					PodAnnotation(kueue.PodSetPreferredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
-					PodAnnotation(kueue.PodSetSliceSizeAnnotation, "3").
+					PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
 					CompletionMode(batchv1.IndexedCompletion).
 					BackoffLimit(1).
 					Obj()
@@ -717,7 +711,7 @@ func waitForDummyWorkloadToRunOnNode(node *corev1.Node, lq *kueue.LocalQueue) {
 			NodeSelector(corev1.LabelHostname, node.Name).
 			Image(util.GetAgnHostImage(), util.BehaviorExitFast).
 			Obj()
-		gomega.Expect(k8sClient.Create(ctx, dummyJob)).To(gomega.Succeed())
+		util.MustCreate(ctx, k8sClient, dummyJob)
 		gomega.Eventually(func(g gomega.Gomega) {
 			var createdDummyJob batchv1.Job
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dummyJob), &createdDummyJob)).To(gomega.Succeed())
