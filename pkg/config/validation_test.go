@@ -1072,6 +1072,19 @@ func TestValidateFeatureGates(t *testing.T) {
 				},
 			},
 		},
+		"DRAExtendedResources requires DynamicResourceAllocation": {
+			setupFeatureGates: map[featuregate.Feature]bool{
+				features.DRAExtendedResources:      true,
+				features.DynamicResourceAllocation: false,
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:   field.ErrorTypeInvalid,
+					Field:  "featureGates",
+					Detail: "DRAExtendedResources requires DynamicResourceAllocation to be enabled",
+				},
+			},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

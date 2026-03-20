@@ -110,9 +110,9 @@ type AssignmentClusterQueueState struct {
 	ClusterQueueGeneration int64
 }
 
-// dra holds DRA-specific configuration for workload.Info construction.
 type dra struct {
-	preprocessedDRAResources map[kueue.PodSetReference]corev1.ResourceList
+	preprocessedDRAResources  map[kueue.PodSetReference]corev1.ResourceList
+	replacedExtendedResources map[kueue.PodSetReference]sets.Set[corev1.ResourceName]
 }
 
 type InfoOptions struct {
@@ -139,11 +139,15 @@ func WithResourceTransformations(transforms []config.ResourceTransformation) Inf
 	}
 }
 
-// WithPreprocessedDRAResources creates an InfoOption that provides preprocessed DRA resources.
-func WithPreprocessedDRAResources(draResources map[kueue.PodSetReference]corev1.ResourceList) InfoOption {
+// WithPreprocessedDRAResources provides DRA resources to add and extended resources to remove.
+func WithPreprocessedDRAResources(
+	draResources map[kueue.PodSetReference]corev1.ResourceList,
+	replacedExtendedResources map[kueue.PodSetReference]sets.Set[corev1.ResourceName],
+) InfoOption {
 	return func(o *InfoOptions) {
 		o.dra = dra{
-			preprocessedDRAResources: draResources,
+			preprocessedDRAResources:  draResources,
+			replacedExtendedResources: replacedExtendedResources,
 		}
 	}
 }
@@ -589,6 +593,13 @@ func totalRequestsFromPodSets(wl *kueue.Workload, info *InfoOptions) []PodSetRes
 		effectiveRequests = applyResourceTransformations(effectiveRequests, info.resourceTransformations)
 		setRes.Requests = resources.NewRequests(effectiveRequests)
 		if features.Enabled(features.DynamicResourceAllocation) && info.preprocessedDRAResources != nil {
+			// First, remove extended resources that were converted to DRA logical resources
+			if replacedRes, exists := info.replacedExtendedResources[ps.Name]; exists {
+				for extRes := range replacedRes {
+					delete(setRes.Requests, extRes)
+				}
+			}
+			// Then, add the DRA logical resources
 			if draRes, exists := info.preprocessedDRAResources[ps.Name]; exists {
 				for resName, quantity := range draRes {
 					if setRes.Requests == nil {
@@ -1330,17 +1341,6 @@ func HasActiveQuotaReservation(w *kueue.Workload) bool {
 // HasDRA returns true if the workload has DRA resources (ResourceClaims or ResourceClaimTemplates).
 func HasDRA(w *kueue.Workload) bool {
 	return HasResourceClaim(w) || HasResourceClaimTemplates(w)
-}
-
-// NeedsDRAReconcile returns true if the workload has DRA resources that require
-// processing in the Reconcile loop rather than being queued directly from event
-// handlers. DRA workloads need Reconcile-based processing for proper error
-// handling (e.g. setting Inadmissible conditions on the workload).
-func NeedsDRAReconcile(wl *kueue.Workload) bool {
-	if !features.Enabled(features.DynamicResourceAllocation) {
-		return false
-	}
-	return HasDRA(wl)
 }
 
 // HasResourceClaimTemplates returns true if the workload has ResourceClaimTemplates.
