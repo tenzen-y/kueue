@@ -29,8 +29,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	"sigs.k8s.io/kueue/test/util"
@@ -239,6 +241,36 @@ var _ = ginkgo.Describe("Visibility Server", func() {
 		}
 		gomega.Expect(k8sClient.Update(ctx, patchedDeployment)).To(gomega.Succeed())
 		util.WaitForKueueAvailabilityNoRestartCountCheck(ctx, k8sClient)
+
+		ginkgo.By("Verifying requests succeed on the custom port")
+		gomega.Eventually(func(g gomega.Gomega) {
+			visClient := util.CreateVisibilityClient("")
+			pw, err := visClient.ClusterQueues().GetPendingWorkloadsSummary(ctx, cqName, metav1.GetOptions{})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(pw).NotTo(gomega.BeNil())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+	})
+
+	ginkgo.It("Should use the custom port from the visibilityServer configuration API", func() {
+		ginkgo.By("Updating the visibilityServer configuration and restarting Kueue")
+		util.UpdateKueueConfigurationAndRestart(ctx, k8sClient, defaultKueueCfg, kindClusterName, func(cfg *configapi.Configuration) {
+			cfg.VisibilityServer = &configapi.VisibilityServerConfiguration{
+				BindPort: ptr.To[int32](customVisibilityPort),
+			}
+		})
+		ginkgo.DeferCleanup(func() {
+			ginkgo.By("Restoring original configuration")
+			util.UpdateKueueConfigurationAndRestart(ctx, k8sClient, defaultKueueCfg, kindClusterName)
+		})
+
+		ginkgo.By("Updating the visibility-server service's targetPort")
+		patchedService := originalService.DeepCopy()
+		for i, p := range patchedService.Spec.Ports {
+			if p.Name == "https" {
+				patchedService.Spec.Ports[i].TargetPort = intstr.FromInt32(customVisibilityPort)
+			}
+		}
+		gomega.Expect(k8sClient.Update(ctx, patchedService)).To(gomega.Succeed())
 
 		ginkgo.By("Verifying requests succeed on the custom port")
 		gomega.Eventually(func(g gomega.Gomega) {

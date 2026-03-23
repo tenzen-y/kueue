@@ -18,6 +18,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"slices"
 	"strings"
@@ -66,6 +67,8 @@ var (
 	objectRetentionPoliciesWorkloadsPath         = objectRetentionPoliciesPath.Child("workloads")
 	tlsPath                                      = field.NewPath("tls")
 	featureGatesPath                             = field.NewPath("featureGates")
+	visibilityServerBindAddressPath              = field.NewPath("visibilityServer", "bindAddress")
+	visibilityServerBindPortPath                 = field.NewPath("visibilityServer", "bindPort")
 	customLabelsPath                             = field.NewPath("metrics", "customLabels")
 )
 
@@ -82,6 +85,7 @@ func validate(c *configapi.Configuration, scheme *runtime.Scheme) field.ErrorLis
 	allErrs = append(allErrs, validateManagedJobsNamespaceSelector(c)...)
 	allErrs = append(allErrs, validateObjectRetentionPolicies(c)...)
 	allErrs = append(allErrs, validateTLS(c)...)
+	allErrs = append(allErrs, validateVisibilityServer(c)...)
 	allErrs = append(allErrs, validateCustomLabels(c)...)
 	return allErrs
 }
@@ -570,6 +574,25 @@ func validateTLS(c *configapi.Configuration) field.ErrorList {
 	if c.TLS.MinVersion == "VersionTLS13" && len(c.TLS.CipherSuites) > 0 {
 		allErrs = append(allErrs, field.Invalid(tlsPath.Child("cipherSuites"),
 			c.TLS.CipherSuites, "may not be specified when `minVersion` is 'VersionTLS13'"))
+	}
+	return allErrs
+}
+
+func validateVisibilityServer(c *configapi.Configuration) field.ErrorList {
+	var allErrs field.ErrorList
+	if c.VisibilityServer == nil {
+		return allErrs
+	}
+	if c.VisibilityServer.BindAddress != nil {
+		if net.ParseIP(*c.VisibilityServer.BindAddress) == nil {
+			allErrs = append(allErrs, field.Invalid(visibilityServerBindAddressPath, *c.VisibilityServer.BindAddress, "must be a valid IP address"))
+		}
+	}
+	if c.VisibilityServer.BindPort != nil {
+		port := *c.VisibilityServer.BindPort
+		if port < 1 || port > 65535 {
+			allErrs = append(allErrs, field.Invalid(visibilityServerBindPortPath, port, "must be a valid port number (1-65535)"))
+		}
 	}
 	return allErrs
 }

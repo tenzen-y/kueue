@@ -994,6 +994,38 @@ The default would be to not set this value and inherit golang settings.</p>
 </tbody>
 </table>
 
+## `VisibilityServerConfiguration`     {#config-kueue-x-k8s-io-v1beta2-VisibilityServerConfiguration}
+    
+
+**Appears in:**
+
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>bindAddress</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>BindAddress is the IP address the visibility server listens on.
+Defaults to 0.0.0.0 (all network interfaces).</p>
+</td>
+</tr>
+<tr><td><code>bindPort</code><br/>
+<code>int32</code>
+</td>
+<td>
+   <p>BindPort is the port the visibility server listens on.
+Defaults to 8082.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
 ## `WaitForPodsReady`     {#config-kueue-x-k8s-io-v1beta2-WaitForPodsReady}
     
 

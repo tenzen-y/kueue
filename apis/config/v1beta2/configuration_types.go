@@ -105,6 +105,10 @@ type Configuration struct {
 	// of Kueue-managed objects. A nil value disables all automatic deletions.
 	// +optional
 	ObjectRetentionPolicies *ObjectRetentionPolicies `json:"objectRetentionPolicies,omitempty"`
+
+	// VisibilityServer configures the visibility server.
+	// +optional
+	VisibilityServer *VisibilityServerConfiguration `json:"visibilityServer,omitempty"`
 }
 
 type ControllerManager struct {
@@ -617,4 +621,16 @@ type WorkloadRetentionPolicy struct {
 	// Represented using metav1.Duration (e.g. "10m", "1h30m").
 	// +optional
 	AfterDeactivatedByKueue *metav1.Duration `json:"afterDeactivatedByKueue,omitempty"`
+}
+
+type VisibilityServerConfiguration struct {
+	// BindAddress is the IP address the visibility server listens on.
+	// Defaults to 0.0.0.0 (all network interfaces).
+	// +optional
+	BindAddress *string `json:"bindAddress,omitempty"`
+
+	// BindPort is the port the visibility server listens on.
+	// Defaults to 8082.
+	// +optional
+	BindPort *int32 `json:"bindPort,omitempty"`
 }

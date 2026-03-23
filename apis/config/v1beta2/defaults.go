@@ -50,6 +50,7 @@ const (
 	DefaultRequeuingBackoffBaseSeconds            = 60
 	DefaultRequeuingBackoffMaxSeconds             = 3600
 	DefaultResourceTransformationStrategy         = Retain
+	DefaultVisibilityBindPort                     = 8082
 )
 
 func getOperatorNamespace() string {
@@ -124,6 +125,8 @@ func SetDefaults_Configuration(cfg *Configuration) {
 	if afs := cfg.AdmissionFairSharing; afs != nil {
 		afs.UsageSamplingInterval.Duration = cmp.Or(afs.UsageSamplingInterval.Duration, 5*time.Minute)
 	}
+	cfg.VisibilityServer = cmp.Or(cfg.VisibilityServer, &VisibilityServerConfiguration{})
+	cfg.VisibilityServer.BindPort = cmp.Or(cfg.VisibilityServer.BindPort, ptr.To[int32](DefaultVisibilityBindPort))
 
 	if cfg.Resources != nil {
 		for idx := range cfg.Resources.Transformations {
