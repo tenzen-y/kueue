@@ -335,6 +335,14 @@ const (
 	//
 	// Enables gating the admission of workloads based on annotations.
 	AdmissionGatedBy featuregate.Feature = "AdmissionGatedBy"
+
+	// owner: @tkillian
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/6143-quota-release-strategy
+	//
+	// When enabled, pods with a DeletionTimestamp are treated as inactive in the
+	// Pod integration's IsActive() check, allowing quota to be released immediately
+	// when preempted pods begin terminating rather than waiting for the grace period.
+	FastQuotaReleaseInPodIntegration featuregate.Feature = "FastQuotaReleaseInPodIntegration"
 )
 
 func init() {
@@ -518,6 +526,10 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	AdmissionGatedBy: {
+		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
+	FastQuotaReleaseInPodIntegration: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }
