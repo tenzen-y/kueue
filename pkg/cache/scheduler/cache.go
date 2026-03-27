@@ -536,6 +536,11 @@ func (c *Cache) AddOrUpdateCohort(apiCohort *kueue.Cohort) error {
 func (c *Cache) DeleteCohort(cohortName kueue.CohortReference) {
 	c.Lock()
 	defer c.Unlock()
+
+	if cohort := c.hm.Cohort(cohortName); cohort != nil {
+		cohort.updateAdmittedWorkloadsCount(-cohort.admittedWorkloadsCount)
+	}
+
 	c.hm.DeleteCohort(cohortName)
 
 	// If the cohort still exists after deletion, it means
