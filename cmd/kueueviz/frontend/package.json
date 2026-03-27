@@ -10,6 +10,7 @@
     "build": "vite build",
     "dev": "vite --no-open",
     "preview": "vite preview",
+    "test": "vitest run",
     "check-unused": "depcheck",
     "serve": "serve -s build"
   },
@@ -29,6 +30,7 @@
     "@vitejs/plugin-react": "^5.1.4",
     "depcheck": "^1.4.7",
     "vite": "^7.3.1",
+    "vitest": "^4.0.18",
     "serve": "^14.2.6"
   },
   "browserslist": {
