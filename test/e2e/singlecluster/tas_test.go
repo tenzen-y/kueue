@@ -493,13 +493,24 @@ var _ = ginkgo.Describe("TopologyAwareScheduling", ginkgo.Label("area:singleclus
 				TrainerImage(util.GetAgnHostImage(), []string{"/agnhost"}, util.BehaviorExitFast).
 				TrainerRequest(corev1.ResourceCPU, "500m").
 				TrainerRequest(corev1.ResourceMemory, "200Mi").
-				PodTemplateOverrides([]kftrainerapi.PodTemplateOverride{
+				RuntimePatches([]kftrainerapi.RuntimePatch{
 					{
-						TargetJobs: []kftrainerapi.PodTemplateOverrideTargetJob{
-							{Name: "node"},
-						},
-						Metadata: &metav1.ObjectMeta{
-							Annotations: map[string]string{kueue.PodSetRequiredTopologyAnnotation: corev1.LabelHostname},
+						Manager: "test-e2e/tas",
+						TrainingRuntimeSpec: &kftrainerapi.TrainingRuntimeSpecPatch{
+							Template: &kftrainerapi.JobSetTemplatePatch{Spec: &kftrainerapi.JobSetSpecPatch{
+								ReplicatedJobs: []kftrainerapi.ReplicatedJobPatch{
+									{
+										Name: "node",
+										Template: &kftrainerapi.JobTemplatePatch{Spec: &kftrainerapi.JobSpecPatch{
+											Template: &kftrainerapi.PodTemplatePatch{
+												Metadata: &metav1.ObjectMeta{
+													Annotations: map[string]string{kueue.PodSetRequiredTopologyAnnotation: corev1.LabelHostname},
+												},
+											},
+										}},
+									},
+								},
+							}},
 						},
 					},
 				}).
@@ -517,9 +528,21 @@ var _ = ginkgo.Describe("TopologyAwareScheduling", ginkgo.Label("area:singleclus
 				}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 			})
 
-			ginkgo.By("verify the TrainJob has nodeSelector set", func() {
-				gomega.Expect(trainjob.Spec.PodTemplateOverrides).To(gomega.HaveLen(2))
-				gomega.Expect(trainjob.Spec.PodTemplateOverrides[1].Spec.NodeSelector).To(gomega.Equal(
+			var kueueRuntimePatch *kftrainerapi.RuntimePatch
+			ginkgo.By("Verify that the trainjob has a runtime patch from kueue", func() {
+				for _, p := range trainjob.Spec.RuntimePatches {
+					if p.Manager == "kueue.x-k8s.io/manager" {
+						kueueRuntimePatch = &p
+						break
+					}
+				}
+				gomega.Expect(kueueRuntimePatch).ToNot(gomega.BeNil())
+			})
+
+			ginkgo.By("Verify the trainjob has nodeSelector set", func() {
+				rJobs := kueueRuntimePatch.TrainingRuntimeSpec.Template.Spec.ReplicatedJobs
+				gomega.Expect(rJobs).To(gomega.HaveLen(1))
+				gomega.Expect(rJobs[0].Template.Spec.Template.Spec.NodeSelector).To(gomega.Equal(
 					map[string]string{
 						"instance-type": "on-demand",
 					},

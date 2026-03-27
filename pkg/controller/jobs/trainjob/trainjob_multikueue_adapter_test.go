@@ -78,6 +78,46 @@ func TestMultiKueueAdapter(t *testing.T) {
 					Obj(),
 			},
 		},
+		"sync creates remote TrainJob stripping kueue runtime patch": {
+			managersTrainJobs: []kftrainerapi.TrainJob{
+				*baseTrainJobManagedByKueueBuilder.Clone().
+					RuntimePatches([]kftrainerapi.RuntimePatch{
+						{
+							Manager: runtimePatchManagerName,
+							TrainingRuntimeSpec: &kftrainerapi.TrainingRuntimeSpecPatch{
+								Template: &kftrainerapi.JobSetTemplatePatch{
+									Spec: &kftrainerapi.JobSetSpecPatch{},
+								},
+							},
+						},
+					}).
+					Obj(),
+			},
+			operation: func(ctx context.Context, adapter *multiKueueAdapter, managerClient, workerClient client.Client) error {
+				return adapter.SyncJob(ctx, managerClient, workerClient, types.NamespacedName{Name: "trainjob1", Namespace: TestNamespace}, "wl1", "origin1")
+			},
+
+			wantManagersTrainJobs: []kftrainerapi.TrainJob{
+				*baseTrainJobManagedByKueueBuilder.Clone().
+					RuntimePatches([]kftrainerapi.RuntimePatch{
+						{
+							Manager: runtimePatchManagerName,
+							TrainingRuntimeSpec: &kftrainerapi.TrainingRuntimeSpecPatch{
+								Template: &kftrainerapi.JobSetTemplatePatch{
+									Spec: &kftrainerapi.JobSetSpecPatch{},
+								},
+							},
+						},
+					}).
+					Obj(),
+			},
+			wantWorkerTrainJobs: []kftrainerapi.TrainJob{
+				*baseTrainJobBuilder.Clone().
+					Label(constants.PrebuiltWorkloadLabel, "wl1").
+					Label(kueue.MultiKueueOriginLabel, "origin1").
+					Obj(),
+			},
+		},
 		"sync status from remote trainjob": {
 			managersTrainJobs: []kftrainerapi.TrainJob{
 				*baseTrainJobManagedByKueueBuilder.Clone().Obj(),

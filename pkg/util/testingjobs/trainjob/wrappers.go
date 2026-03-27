@@ -53,9 +53,9 @@ func (t *TrainJobWrapper) Clone() *TrainJobWrapper {
 	return &TrainJobWrapper{TrainJob: *t.DeepCopy()}
 }
 
-// PodTemplateOverrides sets the custom pod template overrides to be set to the TrainJob jobset jobs
-func (t *TrainJobWrapper) PodTemplateOverrides(overrides []kftrainerapi.PodTemplateOverride) *TrainJobWrapper {
-	t.Spec.PodTemplateOverrides = overrides
+// RuntimePatches sets the runtime patches on the TrainJob
+func (t *TrainJobWrapper) RuntimePatches(patches []kftrainerapi.RuntimePatch) *TrainJobWrapper {
+	t.Spec.RuntimePatches = patches
 	return t
 }
 
@@ -103,13 +103,33 @@ func (t *TrainJobWrapper) Label(key, value string) *TrainJobWrapper {
 	return t
 }
 
-// JobSetLabel sets the Trainjob jobset label key and value
+// JobSetLabel sets a label on the child JobSet via RuntimePatches
 func (t *TrainJobWrapper) JobSetLabel(key, value string) *TrainJobWrapper {
-	if t.Spec.Labels == nil {
-		t.Spec.Labels = make(map[string]string)
+	for i := range t.Spec.RuntimePatches {
+		if t.Spec.RuntimePatches[i].Manager == "kueue.x-k8s.io/manager" {
+			metadata := t.Spec.RuntimePatches[i].TrainingRuntimeSpec.Template.Metadata
+			if metadata == nil {
+				metadata = &metav1.ObjectMeta{}
+			}
+			if metadata.Labels == nil {
+				metadata.Labels = make(map[string]string)
+			}
+			metadata.Labels[key] = value
+			t.Spec.RuntimePatches[i].TrainingRuntimeSpec.Template.Metadata = metadata
+			return t
+		}
 	}
-	t.Spec.Labels[key] = value
-	return t
+	return t.RuntimePatches(append(t.Spec.RuntimePatches, kftrainerapi.RuntimePatch{
+		Manager: "kueue.x-k8s.io/manager",
+		TrainingRuntimeSpec: &kftrainerapi.TrainingRuntimeSpecPatch{
+			Template: &kftrainerapi.JobSetTemplatePatch{
+				Metadata: &metav1.ObjectMeta{
+					Labels: map[string]string{key: value},
+				},
+				Spec: &kftrainerapi.JobSetSpecPatch{},
+			},
+		},
+	}))
 }
 
 // Obj returns the inner TrainJob.
