@@ -120,6 +120,7 @@ type RayService rayv1.RayService
 var _ jobframework.GenericJob = (*RayService)(nil)
 var _ jobframework.JobWithCustomAnnotations = (*RayService)(nil)
 var _ jobframework.JobWithManagedBy = (*RayService)(nil)
+var _ jobframework.ElasticWorkloadNameProvider = (*RayService)(nil)
 
 func (j *RayService) Object() client.Object {
 	return (*rayv1.RayService)(j)
@@ -218,7 +219,11 @@ func (j *RayService) PodsReady(ctx context.Context) bool {
 }
 
 func (j *RayService) GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error) {
-	return jobframework.GetWorkloadslicingCustomAnnotations(j.Object(), podSets)
+	return raycluster.GetWorkloadslicingRayClusterCustomAnnotations(ctx, c, j.Object(), podSets, j.Status.ActiveServiceStatus.RayClusterName)
+}
+
+func (j *RayService) GetWorkloadNameExtraPart() string {
+	return raycluster.GetWorkloadNameExtraPart(j.GetObjectMeta())
 }
 
 func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {

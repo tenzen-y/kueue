@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1370,7 +1371,13 @@ func (r *JobReconciler) constructWorkload(ctx context.Context, job GenericJob) (
 func newWorkloadName(job GenericJob) string {
 	object := job.Object()
 	if WorkloadSliceEnabled(job) {
-		return GetWorkloadNameForOwnerWithGVKAndGeneration(object.GetName(), object.GetUID(), job.GVK(), object.GetGeneration())
+		extra := ""
+		if elasticWorkloadNameProvider, ok := job.(ElasticWorkloadNameProvider); ok {
+			extra = elasticWorkloadNameProvider.GetWorkloadNameExtraPart()
+		} else {
+			extra = strconv.FormatInt(object.GetGeneration(), 10)
+		}
+		return GenerateWorkloadNameWithExtra(object.GetName(), object.GetUID(), job.GVK(), extra)
 	}
 	return GetWorkloadNameForOwnerWithGVK(object.GetName(), object.GetUID(), job.GVK())
 }
