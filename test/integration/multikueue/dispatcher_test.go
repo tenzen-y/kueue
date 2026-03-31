@@ -33,7 +33,6 @@ import (
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	workloadjob "sigs.k8s.io/kueue/pkg/controller/jobs/job"
-	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
@@ -403,7 +402,7 @@ var _ = ginkgo.Describe("MultiKueueDispatcherExternal", ginkgo.Label("area:multi
 				g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, wlLookupKey, createdWorkload)).To(gomega.Succeed())
 				g.Expect(createdWorkload.Status.ClusterName).To(gomega.HaveValue(gomega.Equal(workerCluster2.Name)))
 				g.Expect(createdWorkload.Status.NominatedClusterNames).To(gomega.BeEmpty())
-			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 		})
 
 		ginkgo.By("setting the check conditions for eviction", func() {
@@ -584,10 +583,8 @@ var _ = ginkgo.Describe("MultiKueueDispatcherAllAtOnce", ginkgo.Label("area:mult
 						Message: "The workload is admitted",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 				))
-				state := admissioncheck.FindAdmissionCheck(createdWorkload.Status.AdmissionChecks, kueue.AdmissionCheckReference(multiKueueAC.Name))
-				g.Expect(state).NotTo(gomega.BeNil())
-				g.Expect(state.State).To(gomega.Equal(kueue.CheckStateReady))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			util.ExpectAdmissionCheckState(managerTestCluster.ctx, managerTestCluster.client, wlLookupKey, multiKueueAC.Name, kueue.CheckStateReady)
 		})
 
 		ginkgo.By("checking the workload ClusterName in the management cluster", func() {
@@ -633,10 +630,8 @@ var _ = ginkgo.Describe("MultiKueueDispatcherAllAtOnce", ginkgo.Label("area:mult
 						Message: "The workload is admitted",
 					}, util.IgnoreConditionTimestampsAndObservedGeneration),
 				))
-				state := admissioncheck.FindAdmissionCheck(createdWorkload.Status.AdmissionChecks, kueue.AdmissionCheckReference(multiKueueAC.Name))
-				g.Expect(state).NotTo(gomega.BeNil())
-				g.Expect(state.State).To(gomega.Equal(kueue.CheckStateReady))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			util.ExpectAdmissionCheckState(managerTestCluster.ctx, managerTestCluster.client, wlLookupKey, multiKueueAC.Name, kueue.CheckStateReady)
 		})
 	})
 })
@@ -772,12 +767,10 @@ var _ = ginkgo.Describe("MultiKueueConfig Re-evaluation", ginkgo.Label("area:mul
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 
 			// Now add worker2 to the MultiKueueConfig
-			gomega.Eventually(func() error {
-				if err := managerTestCluster.client.Get(managerTestCluster.ctx, client.ObjectKeyFromObject(managerMultiKueueConfig), managerMultiKueueConfig); err != nil {
-					return err
-				}
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, client.ObjectKeyFromObject(managerMultiKueueConfig), managerMultiKueueConfig)).To(gomega.Succeed())
 				managerMultiKueueConfig.Spec.Clusters = []string{workerCluster1.Name, workerCluster2.Name}
-				return managerTestCluster.client.Update(managerTestCluster.ctx, managerMultiKueueConfig)
+				g.Expect(managerTestCluster.client.Update(managerTestCluster.ctx, managerMultiKueueConfig)).To(gomega.Succeed())
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 
 			ginkgo.By("Wait for admission check to remain active with both clusters")
@@ -788,7 +781,7 @@ var _ = ginkgo.Describe("MultiKueueConfig Re-evaluation", ginkgo.Label("area:mul
 				cluster2 := &kueue.MultiKueueCluster{}
 				g.Expect(managerTestCluster.client.Get(managerTestCluster.ctx, client.ObjectKeyFromObject(workerCluster2), cluster2)).To(gomega.Succeed())
 				g.Expect(cluster2.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.MultiKueueClusterActive))
-			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 
 			ginkgo.By("Verify existing workload gets re-evaluated and sees both workers")
 			gomega.Eventually(func(g gomega.Gomega) {
@@ -799,7 +792,7 @@ var _ = ginkgo.Describe("MultiKueueConfig Re-evaluation", ginkgo.Label("area:mul
 					"workload should see worker2 after it's added to MultiKueueConfig")
 				g.Expect(actualClusters.Has(workerCluster1.Name)).To(gomega.BeTrue(),
 					"workload should still see worker1")
-			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 
 			ginkgo.By("Verify workloads get created on both worker clusters")
 			gomega.Eventually(func(g gomega.Gomega) {
@@ -807,7 +800,7 @@ var _ = ginkgo.Describe("MultiKueueConfig Re-evaluation", ginkgo.Label("area:mul
 				g.Expect(worker1TestCluster.client.Get(worker1TestCluster.ctx, workloadLookupKey, remoteWorkload1)).To(gomega.Succeed())
 				remoteWorkload2 := &kueue.Workload{}
 				g.Expect(worker2TestCluster.client.Get(worker2TestCluster.ctx, workloadLookupKey, remoteWorkload2)).To(gomega.Succeed())
-			}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 		})
 	})
 })

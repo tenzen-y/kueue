@@ -40,6 +40,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -380,6 +381,9 @@ objectRetentionPolicies:
 		cmpopts.IgnoreUnexported(net.ListenConfig{}),
 		cmpopts.IgnoreFields(ctrl.Options{}, "Scheme", "Logger"),
 		cmpopts.IgnoreFields(webhook.Options{}, "TLSOpts"),
+		// DefaultTransform is a function and cannot be compared with cmp.Diff;
+		// it is tested separately in TestDefaultTransformStripsManagedFields.
+		cmpopts.IgnoreFields(ctrlcache.Options{}, "DefaultTransform"),
 	}
 
 	// Ignore the controller manager section since it's side effect is checked against
@@ -414,6 +418,10 @@ objectRetentionPolicies:
 		DispatcherName:    ptr.To(configapi.MultiKueueDispatcherModeAllAtOnce),
 	}
 
+	defaultVisibility := &configapi.VisibilityServerConfiguration{
+		BindPort: ptr.To[int32](configapi.DefaultVisibilityBindPort),
+	}
+
 	testcases := []struct {
 		name                 string
 		configFile           string
@@ -433,6 +441,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -450,6 +459,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -487,6 +497,7 @@ objectRetentionPolicies:
 						},
 					},
 				},
+				VisibilityServer: defaultVisibility,
 			},
 			wantOptions: defaultControlOptions("kueue-tenant-a"),
 		},
@@ -505,6 +516,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: ctrl.Options{
 				Cache:                  defaultControlCacheOptions(configapi.DefaultNamespace),
@@ -540,6 +552,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -560,6 +573,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -578,6 +592,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: ctrl.Options{
 				Cache:                  defaultControlCacheOptions("kueue-system"),
@@ -620,6 +635,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -641,6 +657,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -662,6 +679,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: ctrl.Options{
 				Cache:                  defaultControlCacheOptions(configapi.DefaultNamespace),
@@ -708,6 +726,7 @@ objectRetentionPolicies:
 				},
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -748,6 +767,7 @@ objectRetentionPolicies:
 					},
 				},
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 			},
 			wantOptions: defaultControlOptions(configapi.DefaultNamespace),
 		},
@@ -766,6 +786,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 				Resources: &configapi.Resources{
 					Transformations: []configapi.ResourceTransformation{
 						{
@@ -819,6 +840,7 @@ objectRetentionPolicies:
 				Integrations:                 defaultIntegrations,
 				MultiKueue:                   defaultMultiKueue,
 				ManagedJobsNamespaceSelector: defaultManagedJobsNamespaceSelector,
+				VisibilityServer:             defaultVisibility,
 				ObjectRetentionPolicies: &configapi.ObjectRetentionPolicies{
 					Workloads: &configapi.WorkloadRetentionPolicy{
 						AfterFinished:           &metav1.Duration{Duration: 30 * time.Minute},
@@ -842,6 +864,9 @@ objectRetentionPolicies:
 				}
 				if diff := cmp.Diff(tc.wantOptions, options, ctrlOptsCmpOpts...); diff != "" {
 					t.Errorf("Unexpected options (-want +got):\n%s", diff)
+				}
+				if options.Cache.DefaultTransform == nil {
+					t.Error("Expected DefaultTransform to be set, got nil")
 				}
 			} else {
 				if diff := cmp.Diff(tc.wantError.Error(), err.Error()); diff != "" {
@@ -891,14 +916,14 @@ webhook:
 	testcases := []struct {
 		name              string
 		configFile        string
-		featureGateValue  bool
+		featureGates      map[featuregate.Feature]bool
 		wantConfiguration configapi.Configuration
 		verifyTLSApplied  bool
 	}{
 		{
-			name:             "TLS config applied when feature gate enabled",
-			configFile:       tlsConfigWithCipherSuites,
-			featureGateValue: true,
+			name:         "TLS config applied when feature gate enabled",
+			configFile:   tlsConfigWithCipherSuites,
+			featureGates: map[featuregate.Feature]bool{features.TLSOptions: true},
 			wantConfiguration: configapi.Configuration{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: configapi.GroupVersion.String(),
@@ -946,9 +971,9 @@ webhook:
 			verifyTLSApplied: true,
 		},
 		{
-			name:             "TLS config NOT applied when feature gate disabled",
-			configFile:       tlsConfigWithCipherSuites,
-			featureGateValue: false,
+			name:         "TLS config NOT applied when feature gate disabled",
+			configFile:   tlsConfigWithCipherSuites,
+			featureGates: map[featuregate.Feature]bool{features.TLSOptions: false},
 			wantConfiguration: configapi.Configuration{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: configapi.GroupVersion.String(),
@@ -996,9 +1021,9 @@ webhook:
 			verifyTLSApplied: false,
 		},
 		{
-			name:             "TLS 1.3 config applied when feature gate enabled",
-			configFile:       tlsConfigTLS13,
-			featureGateValue: true,
+			name:         "TLS 1.3 config applied when feature gate enabled",
+			configFile:   tlsConfigTLS13,
+			featureGates: map[featuregate.Feature]bool{features.TLSOptions: true},
 			wantConfiguration: configapi.Configuration{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: configapi.GroupVersion.String(),
@@ -1042,9 +1067,9 @@ webhook:
 			verifyTLSApplied: true,
 		},
 		{
-			name:             "TLS 1.3 config NOT applied when feature gate disabled",
-			configFile:       tlsConfigTLS13,
-			featureGateValue: false,
+			name:         "TLS 1.3 config NOT applied when feature gate disabled",
+			configFile:   tlsConfigTLS13,
+			featureGates: map[featuregate.Feature]bool{features.TLSOptions: false},
 			wantConfiguration: configapi.Configuration{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: configapi.GroupVersion.String(),
@@ -1092,7 +1117,7 @@ webhook:
 	for _, tc := range testcases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Set the feature gate for this test
-			features.SetFeatureGateDuringTest(t, features.TLSOptions, tc.featureGateValue)
+			features.SetFeatureGatesDuringTest(t, tc.featureGates)
 
 			options, cfg, err := Load(testScheme, tc.configFile)
 			if err != nil {
@@ -1104,7 +1129,7 @@ webhook:
 
 			// Compare the loaded configuration
 			configCmpOpts := cmp.Options{
-				cmpopts.IgnoreFields(configapi.Configuration{}, "ControllerManager"),
+				cmpopts.IgnoreFields(configapi.Configuration{}, "ControllerManager", "VisibilityServer"),
 			}
 			if diff := cmp.Diff(tc.wantConfiguration, cfg, configCmpOpts...); diff != "" {
 				t.Errorf("Unexpected config (-want +got):\n%s", diff)
@@ -1179,6 +1204,9 @@ func TestEncode(t *testing.T) {
 				},
 				"metrics": map[string]any{
 					"bindAddress": configapi.DefaultMetricsBindAddress,
+					"localQueueMetrics": map[string]any{
+						"enable": true,
+					},
 				},
 				"health": map[string]any{
 					"healthProbeBindAddress": configapi.DefaultHealthProbeBindAddress,
@@ -1217,6 +1245,9 @@ func TestEncode(t *testing.T) {
 					"origin":            "multikueue",
 					"workerLostTimeout": "15m0s",
 					"dispatcherName":    configapi.MultiKueueDispatcherModeAllAtOnce,
+				},
+				"visibilityServer": map[string]any{
+					"bindPort": int64(8082),
 				},
 			},
 		},
@@ -1372,6 +1403,101 @@ func TestConfigureClusterProfileCache(t *testing.T) {
 
 			if err == nil {
 				t.Error("Expected error but got none")
+			}
+		})
+	}
+}
+
+func TestDefaultTransformStripsManagedFields(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	if err := configapi.AddToScheme(testScheme); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configFile, []byte(`
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+namespace: kueue-system
+`), os.FileMode(0600)); err != nil {
+		t.Fatal(err)
+	}
+
+	options, _, err := Load(testScheme, configFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if options.Cache.DefaultTransform == nil {
+		t.Fatal("DefaultTransform is nil, cannot test transform behavior")
+	}
+
+	testCases := map[string]struct {
+		pod     *corev1.Pod
+		wantPod *corev1.Pod
+	}{
+		"strips managedFields and preserves object data": {
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels:    map[string]string{"app": "test"},
+					Annotations: map[string]string{
+						"note": "keep-me",
+					},
+					ManagedFields: []metav1.ManagedFieldsEntry{
+						{
+							Manager:   "kubectl",
+							Operation: metav1.ManagedFieldsOperationApply,
+						},
+						{
+							Manager:   "kube-controller-manager",
+							Operation: metav1.ManagedFieldsOperationUpdate,
+						},
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node-1",
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-pod",
+					Namespace:   "default",
+					Labels:      map[string]string{"app": "test"},
+					Annotations: map[string]string{"note": "keep-me"},
+				},
+				Spec: corev1.PodSpec{
+					NodeName: "node-1",
+				},
+			},
+		},
+		"no-op when managedFields already nil": {
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-pod",
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-pod",
+				},
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			result, err := options.Cache.DefaultTransform(tc.pod)
+			if err != nil {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+			got, ok := result.(*corev1.Pod)
+			if !ok {
+				t.Fatal("DefaultTransform returned unexpected type")
+			}
+			if diff := cmp.Diff(tc.wantPod, got); diff != "" {
+				t.Errorf("Unexpected pod after transform (-want +got):\n%s", diff)
 			}
 		})
 	}

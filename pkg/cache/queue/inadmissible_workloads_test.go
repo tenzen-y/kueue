@@ -19,10 +19,71 @@ package queue
 import (
 	"maps"
 	"testing"
+	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"k8s.io/component-base/featuregate"
+
+	"sigs.k8s.io/kueue/pkg/features"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/pkg/workload"
 )
+
+func TestNewRequeuer(t *testing.T) {
+	type args struct {
+		featureGates map[featuregate.Feature]bool
+		opts         []RequeuerOption
+	}
+
+	type want struct {
+		batchPeriod time.Duration
+	}
+
+	testCases := map[string]struct {
+		args args
+		want want
+	}{
+		"SchedulerLongRequeueInterval feature disabled": {
+			args: args{
+				featureGates: map[featuregate.Feature]bool{
+					features.SchedulerLongRequeueInterval: false,
+				},
+			},
+			want: want{
+				batchPeriod: time.Second,
+			},
+		},
+		"SchedulerLongRequeueInterval feature enabled": {
+			args: args{
+				featureGates: map[featuregate.Feature]bool{
+					features.SchedulerLongRequeueInterval: true,
+				},
+			},
+			want: want{
+				batchPeriod: 10 * time.Second,
+			},
+		},
+		"custom batch period": {
+			args: args{
+				opts: []RequeuerOption{
+					WithBatchPeriod(10 * time.Millisecond),
+				},
+			},
+			want: want{
+				batchPeriod: 10 * time.Millisecond,
+			},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGatesDuringTest(t, tc.args.featureGates)
+			requeuer := NewRequeuer(tc.args.opts...)
+			if diff := cmp.Diff(tc.want.batchPeriod, requeuer.batchPeriod); len(diff) != 0 {
+				t.Errorf("Unexpected requeue batch period (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
 
 func TestInadmissibleWorkloads_Get(t *testing.T) {
 	wl1 := workload.NewInfo(utiltestingapi.MakeWorkload("wl1", "ns1").Obj())
@@ -267,76 +328,6 @@ func TestInadmissibleWorkloads_Empty(t *testing.T) {
 
 			if got := iw.empty(); got != tc.wantEmpty {
 				t.Errorf("empty() = %v, want %v", got, tc.wantEmpty)
-			}
-		})
-	}
-}
-
-func TestInadmissibleWorkloads_ForEach(t *testing.T) {
-	wl1 := workload.NewInfo(utiltestingapi.MakeWorkload("wl1", "ns1").Obj())
-	wl2 := workload.NewInfo(utiltestingapi.MakeWorkload("wl2", "ns2").Obj())
-	key1 := workload.Key(wl1.Obj)
-	key2 := workload.Key(wl2.Obj)
-
-	testcases := []struct {
-		name           string
-		initial        map[workload.Reference]*workload.Info
-		stopAfter      int
-		wantVisited    int
-		wantAllVisited bool
-	}{
-		{
-			name:           "iterate over empty map",
-			initial:        nil,
-			stopAfter:      0,
-			wantVisited:    0,
-			wantAllVisited: true,
-		},
-		{
-			name: "iterate over all workloads",
-			initial: map[workload.Reference]*workload.Info{
-				key1: wl1,
-				key2: wl2,
-			},
-			stopAfter:      2,
-			wantVisited:    2,
-			wantAllVisited: true,
-		},
-		{
-			name: "stop early",
-			initial: map[workload.Reference]*workload.Info{
-				key1: wl1,
-				key2: wl2,
-			},
-			stopAfter:      1,
-			wantVisited:    1,
-			wantAllVisited: false,
-		},
-	}
-
-	for _, tc := range testcases {
-		t.Run(tc.name, func(t *testing.T) {
-			iw := make(inadmissibleWorkloads)
-			maps.Copy(iw, tc.initial)
-
-			visited := 0
-			seen := make(map[workload.Reference]bool)
-			iw.forEach(func(key workload.Reference, wInfo *workload.Info) bool {
-				visited++
-				seen[key] = true
-				return visited < tc.stopAfter
-			})
-
-			if visited != tc.wantVisited {
-				t.Errorf("visited %d workloads, want %d", visited, tc.wantVisited)
-			}
-
-			if tc.wantAllVisited {
-				for k := range tc.initial {
-					if !seen[k] {
-						t.Errorf("workload %v was not visited", k)
-					}
-				}
 			}
 		})
 	}

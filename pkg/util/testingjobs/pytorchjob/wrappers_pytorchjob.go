@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package testing
+package pytorchjob
 
 import (
 	kftraining "github.com/kubeflow/training-operator/pkg/apis/kubeflow.org/v1"
@@ -243,6 +243,12 @@ func (j *PyTorchJobWrapper) Image(replicaType kftraining.ReplicaType, image stri
 func (j *PyTorchJobWrapper) SetTypeMeta() *PyTorchJobWrapper {
 	j.APIVersion = kftraining.GroupVersion.String()
 	j.Kind = kftraining.PyTorchJobKind
+	return j
+}
+
+// SetAnnotation sets an annotation on the job.
+func (j *PyTorchJobWrapper) SetAnnotation(key, content string) *PyTorchJobWrapper {
+	j.Annotations[key] = content
 	return j
 }
 

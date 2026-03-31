@@ -23,14 +23,14 @@ declare -r KUBERNETES_SIGS_KUEUE_PATH
 
 cd "$KUBERNETES_SIGS_KUEUE_PATH"
 
+# shellcheck source=hack/utils.sh
+source "${KUBERNETES_SIGS_KUEUE_PATH}/hack/utils.sh"
+
 KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE=${KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE:-upstream}
 KUBERNETES_SIGS_KUEUE_FORK_REMOTE=${KUBERNETES_SIGS_KUEUE_FORK_REMOTE:-origin}
-KUBERNETES_SIGS_KUEUE_MAIN_REPO_ORG=${KUBERNETES_SIGS_KUEUE_MAIN_REPO_ORG:-$(git remote get-url "$KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE" | awk '{gsub(/http[s]:\/\/|git@/,"")}1' | awk -F'[@:./]' 'NR==1{print $3}')}
-KUBERNETES_SIGS_KUEUE_MAIN_REPO_NAME=${KUBERNETES_SIGS_KUEUE_MAIN_REPO_NAME:-$(git remote get-url "$KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE" | awk '{gsub(/http[s]:\/\/|git@/,"")}1' | awk -F'[@:./]' 'NR==1{print $4}')}
+KUBERNETES_SIGS_KUEUE_MAIN_REPO_ORG=${KUBERNETES_SIGS_KUEUE_MAIN_REPO_ORG:-$(get_repo_org "$(git remote get-url "$KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE")")}
+KUBERNETES_SIGS_KUEUE_MAIN_REPO_NAME=${KUBERNETES_SIGS_KUEUE_MAIN_REPO_NAME:-$(get_repo_name "$(git remote get-url "$KUBERNETES_SIGS_KUEUE_UPSTREAM_REMOTE")")}
 KUBERNETES_SIGS_KUEUE_MAIN_REPO="${KUBERNETES_SIGS_KUEUE_MAIN_REPO_ORG}/${KUBERNETES_SIGS_KUEUE_MAIN_REPO_NAME}"
-
-# shellcheck source=hack/releasing/common.sh
-source "${KUBERNETES_SIGS_KUEUE_PATH}/hack/releasing/common.sh"
 
 if [[ -v KUBERNETES_REPOS_PATH ]]; then
   KUBERNETES_REPOS_PATH=$(resolve_path "${KUBERNETES_REPOS_PATH}")
@@ -69,8 +69,8 @@ declare -r REBASE_MAGIC=".git/rebase-apply"
 DRY_RUN=${DRY_RUN:-""}
 KUBERNETES_K8S_IO_UPSTREAM_REMOTE=${KUBERNETES_K8S_IO_UPSTREAM_REMOTE:-upstream}
 KUBERNETES_K8S_IO_FORK_REMOTE=${KUBERNETES_K8S_IO_FORK_REMOTE:-origin}
-KUBERNETES_K8S_IO_MAIN_REPO_ORG=${KUBERNETES_K8S_IO_MAIN_REPO_ORG:-$(git remote get-url "${KUBERNETES_K8S_IO_UPSTREAM_REMOTE}" | awk '{gsub(/http[s]:\/\/|git@/,"")}1' | awk -F'[@:./]' 'NR==1{print $3}')}
-KUBERNETES_K8S_IO_MAIN_REPO_NAME=${KUBERNETES_K8S_IO_MAIN_REPO_NAME:-$(git remote get-url "${KUBERNETES_K8S_IO_UPSTREAM_REMOTE}" | awk '{gsub(/http[s]:\/\/|git@/,"")}1' | awk -F'[@:./]' 'NR==1{print $4}')}
+KUBERNETES_K8S_IO_MAIN_REPO_ORG=${KUBERNETES_K8S_IO_MAIN_REPO_ORG:-$(get_repo_org "$(git remote get-url "${KUBERNETES_K8S_IO_UPSTREAM_REMOTE}")")}
+KUBERNETES_K8S_IO_MAIN_REPO_NAME=${KUBERNETES_K8S_IO_MAIN_REPO_NAME:-$(get_repo_name "$(git remote get-url "${KUBERNETES_K8S_IO_UPSTREAM_REMOTE}")")}
 KUBERNETES_K8S_IO_MAIN_REPO="${KUBERNETES_K8S_IO_MAIN_REPO_ORG}/${KUBERNETES_K8S_IO_MAIN_REPO_NAME}"
 
 if [[ -z ${GITHUB_USER:-} ]]; then
@@ -122,9 +122,7 @@ if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-IFS='.' read -r MAJOR MINOR _ <<< "${RELEASE_VERSION#v}"
-
-declare -r MAJOR_MINOR="$MAJOR.$MINOR"
+IFS='.' read -r _ MINOR _ <<< "${RELEASE_VERSION#v}"
 
 LAST_SUPPORT_MINOR=$((MINOR - 1))
 if [ "$LAST_SUPPORT_MINOR" -lt 0 ]; then
@@ -376,11 +374,11 @@ function push_and_create_pr() {
   fi
 }
 
-K8S_IO_BRANCH="kueue-promote-${MAJOR_MINOR}"
+K8S_IO_BRANCH="kueue-promote-${RELEASE_VERSION}"
 declare -r K8S_IO_BRANCH
 K8S_IO_BRANCH_UNIQUE="${K8S_IO_BRANCH}-$(date +%s)"
 declare -r K8S_IO_BRANCH_UNIQUE
-K8S_IO_PR_NAME="Kueue: Promote ${MAJOR_MINOR}"
+K8S_IO_PR_NAME="Kueue: Promote ${RELEASE_VERSION}"
 declare -r K8S_IO_PR_NAME
 
 prepare_local_branch main "${K8S_IO_BRANCH_UNIQUE}" "${K8S_IO_PR_NAME}"

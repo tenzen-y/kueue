@@ -30,31 +30,32 @@ import (
 func (h *Handlers) ClusterQueuesWebSocketHandler() gin.HandlerFunc {
 	return h.GenericWebSocketHandler(func(ctx context.Context) (any, error) {
 		return h.fetchClusterQueues(ctx)
-	})
+	}, ClusterQueuesGVK())
 }
 
 // ClusterQueueDetailsWebSocketHandler streams details for a specific cluster queue
 func (h *Handlers) ClusterQueueDetailsWebSocketHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		clusterQueueName := c.Param("cluster_queue_name")
+
 		h.GenericWebSocketHandler(func(ctx context.Context) (any, error) {
 			return h.fetchClusterQueueDetails(ctx, clusterQueueName)
-		})(c)
+		}, ClusterQueuesGVK(), LocalQueuesGVK())(c)
 	}
 }
 
 // Fetch all cluster queues
 func (h *Handlers) fetchClusterQueues(ctx context.Context) ([]map[string]any, error) {
 	// Fetch the list of ClusterQueue objects
-	l := &kueueapi.ClusterQueueList{}
-	err := h.client.List(ctx, l)
+	cql := &kueueapi.ClusterQueueList{}
+	err := h.client.List(ctx, cql)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching cluster queues: %v", err)
 	}
 
 	// Process the ClusterQueue objects
 	var result []map[string]any
-	for _, item := range l.Items {
+	for _, item := range cql.Items {
 		// Extract relevant fields
 		name := item.GetName()
 
@@ -75,11 +76,13 @@ func (h *Handlers) fetchClusterQueues(ctx context.Context) ([]map[string]any, er
 		result = append(result, map[string]any{
 			"name":               name,
 			"cohort":             cohort,
-			"resourceGroups":     item.Spec.ResourceGroups,
+			"resourceGroups":     convertResourceGroups(item.Spec.ResourceGroups),
 			"admittedWorkloads":  admittedWorkloads,
 			"pendingWorkloads":   pendingWorkloads,
 			"reservingWorkloads": reservingWorkloads,
 			"flavors":            flavors,
+			"flavorsUsage":       convertFlavorsUsage(item.Status.FlavorsUsage),
+			"flavorsReservation": convertFlavorsUsage(item.Status.FlavorsReservation),
 		})
 	}
 
@@ -109,26 +112,35 @@ func (h *Handlers) fetchClusterQueueDetails(ctx context.Context, name string) (a
 			continue
 		}
 
-		var reservation any = item.Status.FlavorsReservation
-		var usage any = item.Status.FlavorsUsage
-
 		queuesUsingClusterQueue = append(queuesUsingClusterQueue, map[string]any{
 			"namespace":   item.GetNamespace(),
 			"name":        item.GetName(),
-			"reservation": reservation,
-			"usage":       usage,
+			"reservation": convertLocalQueueFlavorsUsage(item.Status.FlavorsReservation),
+			"usage":       convertLocalQueueFlavorsUsage(item.Status.FlavorsUsage),
 		})
 	}
 
-	type cqResult struct {
-		*kueueapi.ClusterQueue
-
-		Queues []map[string]any `json:"queues"`
+	// Build result with converted numeric resource values
+	result := map[string]any{
+		"metadata": cq.ObjectMeta,
+		"spec": map[string]any{
+			"cohortName":        string(cq.Spec.CohortName),
+			"resourceGroups":    convertResourceGroups(cq.Spec.ResourceGroups),
+			"preemption":        cq.Spec.Preemption,
+			"flavorFungibility": cq.Spec.FlavorFungibility,
+			"queueingStrategy":  cq.Spec.QueueingStrategy,
+		},
+		"status": map[string]any{
+			"admittedWorkloads":  cq.Status.AdmittedWorkloads,
+			"reservingWorkloads": cq.Status.ReservingWorkloads,
+			"pendingWorkloads":   cq.Status.PendingWorkloads,
+			"conditions":         cq.Status.Conditions,
+			"flavorsUsage":       convertFlavorsUsage(cq.Status.FlavorsUsage),
+			"flavorsReservation": convertFlavorsUsage(cq.Status.FlavorsReservation),
+			"fairSharing":        cq.Status.FairSharing,
+		},
+		"queues": queuesUsingClusterQueue,
 	}
 
-	// Attach the queues information to the ClusterQueue details
-	return cqResult{
-		ClusterQueue: cq,
-		Queues:       queuesUsingClusterQueue,
-	}, nil
+	return result, nil
 }

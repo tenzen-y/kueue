@@ -106,6 +106,12 @@ following annotations set at the PodTemplate level:
 - `kueue.x-k8s.io/podset-group-name` - indicates the name of the group of PodSets. PodSet Group
     is a unit of flavor assignment and topology domain fitting. This is useful when you want to
     ensure that multiple PodSets are scheduled in the same topology domain.
+- `kueue.x-k8s.io/podset-slice-required-topology-constraints` - defines multi-layer slice
+    topology constraints as a JSON-encoded array. Each entry specifies a topology level and
+    slice size, ordered from the outermost (coarsest) to the innermost (finest) layer. At most
+    3 layers are supported. This annotation is mutually exclusive with
+    `kueue.x-k8s.io/podset-slice-required-topology` and `kueue.x-k8s.io/podset-slice-size`.
+    Requires the `TASMultiLayerTopology` feature gate.
 
 #### Example
 
@@ -270,19 +276,43 @@ will be maximied. Also (as a second criterion) the number of domains used on the
 minimized. However, if the Job would not fit within a single domain **one level above** the indicated level,
 Kueue will not perform the balanced placement and will fallback to the standard TAS algorithm.
 
-### Limitations
+#### Multi-Layer Topology
+{{< feature-state state="alpha" for_version="v0.17" >}}
+{{% alert title="Note" color="primary" %}}
+`TASMultiLayerTopology` is currently an alpha feature and is disabled by default.
 
-Currently, there are limitations for the compatibility of TAS with other
-features, including:
-- some scheduling directives (e.g. pod affinities and anti-affinities) are ignored,
-- the "podset-required-topology" annotation may fail if the underlying
-  ClusterAutoscaler cannot provision nodes that satisfy the domain constraint,
-- a ClusterQueue for [MultiKueue](multikueue.md) referencing a ResourceFlavor
-with Topology name (`.spec.topologyName`) is marked as inactive.
-- The taints on the nodes are not respected unless `kubernetes.io/hostname` is on the lowest topology level.
+You can enable it by editing the `TASMultiLayerTopology` feature gate. Refer to the
+[Installation guide](/docs/installation/#change-the-feature-gates-configuration)
+for instructions on configuring feature gates.
+{{% /alert %}}
 
-These usage scenarios are considered to be supported in the future releases
-of Kueue.
+Multi-layer topology allows you to define up to 3 layers of slice topology constraints,
+enabling fine-grained placement across deep topology hierarchies. This is useful in data
+centers with multiple topology levels (e.g., datacenter, block, rack) where you need
+different slice sizes at each level.
+
+With the single-layer approach (`kueue.x-k8s.io/podset-slice-required-topology` +
+`kueue.x-k8s.io/podset-slice-size`), you can only specify one topology level and one
+slice size. Multi-layer topology extends this by letting you specify constraints at
+multiple levels simultaneously.
+
+For example, if you have 64 pods and want groups of 32 pods within the same block and
+groups of 16 pods within the same rack, you can express this with a single annotation:
+
+```yaml
+kueue.x-k8s.io/podset-slice-required-topology-constraints: |
+  [
+    {"topology": "cloud.provider.com/topology-block", "size": 32},
+    {"topology": "cloud.provider.com/topology-rack", "size": 16}
+  ]
+```
+
+The constraints are specified as a JSON array ordered from the outermost (coarsest) to
+the innermost (finest) topology layer. Each inner slice size must evenly divide the
+outer slice size.
+
+This annotation is mutually exclusive with `kueue.x-k8s.io/podset-slice-required-topology`
+and `kueue.x-k8s.io/podset-slice-size`.
 
 ## Drawbacks
 

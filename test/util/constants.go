@@ -31,22 +31,20 @@ const (
 	TinyTimeout  = 10 * time.Millisecond
 	ShortTimeout = time.Second
 	Timeout      = 10 * time.Second
-	// LongTimeout is meant for E2E tests when waiting for complex operations
+	// MediumTimeout is meant for E2E tests when waiting for complex operations
 	// such as running pods to completion.
-	LongTimeout = 45 * time.Second
-	// VeryLongTimeout is meant for E2E tests involving Ray which starts ray-project images (over 2GB)
-	// and also synchronizes the cluster before it can be used
-	VeryLongTimeout = 5 * time.Minute
-	// StartUpTimeout is meant to be used for waiting for Kueue to startup, given
-	// that cert updates can take up to 3 minutes to propagate to the filesystem.
-	// Taken into account that after the certificates are ready, all Kueue's components
-	// need started and the time it takes for a change in ready probe response triggers
-	// a change in the deployment status.
-	StartUpTimeout          = 5 * time.Minute
-	ShortConsistentDuration = 10 * time.Millisecond
+	MediumTimeout = 45 * time.Second
+	// LongTimeout is meant for E2E tests when waiting for operations that
+	// involve pod lifecycle transitions including container and sandbox teardown.
+	LongTimeout = 90 * time.Second
+	// VeryLongTimeout is meant for waiting for Kueue startup including
+	// cert propagation and component readiness.
+	VeryLongTimeout         = 5 * time.Minute
 	ConsistentDuration      = 1 * time.Second
+	ShortConsistentDuration = 100 * time.Millisecond
 	ShortInterval           = 10 * time.Millisecond
 	Interval                = time.Millisecond * 250
+	LongInterval            = time.Second * 1
 )
 
 var (
@@ -68,6 +66,7 @@ var (
 	MpiOperatorCrds          = filepath.Join(ProjectBaseDir, "dep-crds", "mpi-operator")
 	AppWrapperCrds           = filepath.Join(ProjectBaseDir, "dep-crds", "appwrapper-crds")
 	RayOperatorCrds          = filepath.Join(ProjectBaseDir, "dep-crds", "ray-operator-crds")
+	SparkOperatorCrds        = filepath.Join(ProjectBaseDir, "dep-crds", "spark-operator-crds")
 	WebhookPath              = filepath.Join(ProjectBaseDir, "config", "components", "webhook")
 	ClusterProfileCrds       = filepath.Join(ProjectBaseDir, "dep-crds", "clusterprofile")
 )
@@ -88,3 +87,10 @@ var (
 )
 
 var RealClock = clock.RealClock{}
+
+// Validation error messages used in webhook tests
+const (
+	InvalidRFC1123Message  = `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`
+	InvalidLabelKeyMessage = `name part must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')`
+	InvalidPathMessage     = `Invalid path (regex used for validation is '[A-Za-z0-9/\-._~%!$&'()*+,;=:]+')`
+)

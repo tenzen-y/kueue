@@ -20,10 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
-	"golang.org/x/exp/slices"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -46,6 +46,8 @@ import (
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/controller/constants"
+	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
@@ -57,7 +59,8 @@ import (
 )
 
 var (
-	realClock = clock.RealClock{}
+	realClock                      = clock.RealClock{}
+	singleClusterPreemptionTimeout = 5 * time.Minute
 )
 
 type wlReconciler struct {
@@ -125,13 +128,17 @@ func (g *wlGroup) bestMatchByCondition(conditionType string) (*metav1.Condition,
 	return bestMatchCond, bestMatchRemote
 }
 
+// RemoveRemoteObjects deletes the remote controller object and workload for a cluster.
+// The controller object is deleted first to handle cases where GC has already removed
+// the remote workload.
 func (g *wlGroup) RemoveRemoteObjects(ctx context.Context, cluster string) error {
+	if err := g.jobAdapter.DeleteRemoteObject(ctx, g.remoteClients[cluster].client, g.controllerKey); err != nil {
+		return fmt.Errorf("deleting remote controller object: %w", err)
+	}
+
 	remWl := g.remotes[cluster]
 	if remWl == nil {
 		return nil
-	}
-	if err := g.jobAdapter.DeleteRemoteObject(ctx, g.remoteClients[cluster].client, g.controllerKey); err != nil {
-		return fmt.Errorf("deleting remote controller object: %w", err)
 	}
 
 	if controllerutil.RemoveFinalizer(remWl, kueue.ResourceInUseFinalizerName) {
@@ -263,12 +270,24 @@ func (w *wlReconciler) remoteClientsForAC(ctx context.Context, acName kueue.Admi
 }
 
 func (w *wlReconciler) adapter(local *kueue.Workload) (jobframework.MultiKueueAdapter, *metav1.OwnerReference) {
+	// Try job owner annotations for multi-owner workloads (e.g., LWS).
+	if gvkStr, ok := local.Annotations[constants.JobOwnerGVKAnnotation]; ok {
+		if adapter, found := w.adapters[gvkStr]; found {
+			if jobName, ok := local.Annotations[constants.JobOwnerNameAnnotation]; ok && jobName != "" {
+				apiVersion, kind := adapter.GVK().ToAPIVersionAndKind()
+				return adapter, &metav1.OwnerReference{
+					APIVersion: apiVersion,
+					Kind:       kind,
+					Name:       jobName,
+				}
+			}
+		}
+	}
+
 	if controller := metav1.GetControllerOf(local); controller != nil {
 		adapterKey := schema.FromAPIVersionAndKind(controller.APIVersion, controller.Kind).String()
 		return w.adapters[adapterKey], controller
 	} else if refs := local.GetOwnerReferences(); len(refs) > 0 {
-		// For workloads without a controller but with owner references,
-		// use the first owner reference to find the adapter. This supports composable workloads.
 		adapterKey := schema.FromAPIVersionAndKind(refs[0].APIVersion, refs[0].Kind).String()
 		return w.adapters[adapterKey], &refs[0]
 	}
@@ -347,7 +366,7 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 		}
 
 		// finish workload and copy the status to the local one
-		return reconcile.Result{}, workload.Finish(ctx, w.client, group.local, remoteFinishedCond.Reason, remoteFinishedCond.Message, w.clock, w.roleTracker)
+		return reconcile.Result{}, workload.Finish(ctx, w.client, group.local, remoteFinishedCond.Reason, remoteFinishedCond.Message, w.clock)
 	}
 
 	// 4. Handle workload eviction
@@ -392,7 +411,12 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 	// - elastic workloads which have been scaled down
 	// - workloads for which workload priority has changed
 	for rem, remWl := range group.remotes {
-		if remWl != nil && !equality.Semantic.DeepEqual(group.local.Spec, remWl.Spec) {
+		if remWl != nil && isRemoteSpecOutOfSync(group.local.Spec, remWl.Spec) {
+			var remotePreemptionGates []kueue.PreemptionGate
+			if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+				remotePreemptionGates = remWl.Spec.PreemptionGates
+			}
+
 			remClient := group.remoteClients[rem]
 
 			updateRemote := false
@@ -404,13 +428,18 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 			}
 
 			// Update the workload priority class and priority if needed.
-			if workload.PriorityChanged(group.local, remWl) {
+			if workload.PriorityChanged(log, group.local, remWl) {
 				remWl.Spec.PriorityClassRef = group.local.Spec.PriorityClassRef
 				remWl.Spec.Priority = group.local.Spec.Priority
 				updateRemote = true
 			}
 
 			if updateRemote {
+				if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+					// Make sure to not overwrite preemption gates which are managed by the worker.
+					remWl.Spec.PreemptionGates = remotePreemptionGates
+				}
+
 				if err := remClient.client.Update(ctx, remWl); err != nil {
 					return reconcile.Result{}, fmt.Errorf("failed to update remote workload: %w", err)
 				}
@@ -446,7 +475,7 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 		remoteWl := group.remotes[reservingRemote]
 
 		log = log.WithValues("remote", reservingRemote, "remoteWorkload", klog.KObj(remoteWl))
-		ctrl.LoggerInto(ctx, log)
+		ctx = ctrl.LoggerInto(ctx, log)
 
 		evictedCond := apimeta.FindStatusCondition(group.local.Status.Conditions, kueue.WorkloadEvicted)
 		if workload.HasQuotaReservation(group.local) && evictedCond != nil && evictedCond.Status == metav1.ConditionTrue {
@@ -485,12 +514,238 @@ func (w *wlReconciler) reconcileGroup(ctx context.Context, group *wlGroup) (reco
 		}
 	}
 
-	return w.nominateAndSynchronizeWorkers(ctx, group)
+	// 7. Open the preemption gate if applicable
+	var requeueAfterSynchronize time.Duration
+	if features.Enabled(features.MultiKueueOrchestratedPreemption) {
+		remWlName, requeueIn := w.workloadToOpenPreemptionGate(ctx, group)
+		if remWlName != nil {
+			remWl := group.remotes[*remWlName]
+			remClient := group.remoteClients[*remWlName]
+			workload.SetPreemptionGatePosition(remWl, constants.MultiKueuePreemptionGate, kueue.PreemptionGatePositionOpen, metav1.NewTime(w.clock.Now()))
+			if err := remClient.client.Status().Update(ctx, remWl); err != nil {
+				return reconcile.Result{}, fmt.Errorf("failed to update remote workload: %w", err)
+			}
+		}
+		// Ensure there is a reconcile that considers the next preemption gate.
+		requeueAfterSynchronize = requeueIn
+	}
+
+	res, err := w.nominateAndSynchronizeWorkers(ctx, group)
+	if err == nil && (res.RequeueAfter == 0 || requeueAfterSynchronize < res.RequeueAfter) {
+		res.RequeueAfter = requeueAfterSynchronize
+	}
+	return res, err
+}
+
+func isRemoteSpecOutOfSync(local, remote kueue.WorkloadSpec) bool {
+	remote.PreemptionGates = nil
+	return !equality.Semantic.DeepEqual(local, remote)
+}
+
+func (w *wlReconciler) listComponentWorkloads(ctx context.Context, wl *kueue.Workload) (*kueue.WorkloadList, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	ownerGVK, hasGVK := wl.Annotations[constants.JobOwnerGVKAnnotation]
+	if !hasGVK {
+		return nil, nil
+	}
+
+	var ownerUID string
+	for _, ref := range wl.OwnerReferences {
+		refGVK := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).String()
+		if refGVK == ownerGVK {
+			ownerUID = string(ref.UID)
+			break
+		}
+	}
+	if ownerUID == "" {
+		log.V(3).Info("Workload has JobOwnerGVKAnnotation but no matching owner reference",
+			"workload", klog.KObj(wl), "ownerGVK", ownerGVK)
+		return nil, nil
+	}
+
+	componentWorkloads := &kueue.WorkloadList{}
+	if err := w.client.List(ctx, componentWorkloads,
+		client.InNamespace(wl.Namespace),
+		client.MatchingFields{indexer.OwnerReferenceUID: ownerUID},
+	); err != nil {
+		return nil, err
+	}
+
+	log.V(4).Info("Listed component workloads",
+		"workload", klog.KObj(wl), "count", len(componentWorkloads.Items))
+	return componentWorkloads, nil
+}
+
+func (w *wlReconciler) getComponentWorkloadsClusterName(ctx context.Context, wl *kueue.Workload, componentWorkloads *kueue.WorkloadList) (string, error) {
+	if componentWorkloads == nil {
+		return "", nil
+	}
+
+	var clusterName string
+	for i := range componentWorkloads.Items {
+		member := &componentWorkloads.Items[i]
+		if member.Name == wl.Name {
+			continue
+		}
+
+		if memberCluster := workload.ClusterName(member); memberCluster != "" {
+			if clusterName != "" && clusterName != memberCluster {
+				ctrl.LoggerFrom(ctx).Error(nil, "Component workloads assigned to different clusters",
+					"workload", klog.KObj(wl), "cluster1", clusterName, "cluster2", memberCluster)
+				return "", fmt.Errorf("component workloads assigned to different clusters: %q and %q", clusterName, memberCluster)
+			}
+			clusterName = memberCluster
+		}
+	}
+
+	return clusterName, nil
+}
+
+func isPrimaryComponentWorkload(wl *kueue.Workload, adapter jobframework.MultiKueueAdapter, componentWorkloads *kueue.WorkloadList) bool {
+	multiWorkloadAdapter, hasMultiWorkload := adapter.(jobframework.MultiKueueMultiWorkloadAdapter)
+	if !hasMultiWorkload || componentWorkloads == nil {
+		return true
+	}
+
+	if multiWorkloadAdapter.GetWorkloadIndex(wl) < 0 {
+		return false
+	}
+
+	for i := range componentWorkloads.Items {
+		member := &componentWorkloads.Items[i]
+		if member.Name == wl.Name {
+			continue
+		}
+
+		if hasLowerIndex(multiWorkloadAdapter, member, wl) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func hasLowerIndex(adapter jobframework.MultiKueueMultiWorkloadAdapter, member, wl *kueue.Workload) bool {
+	memberIndex := adapter.GetWorkloadIndex(member)
+	wlIndex := adapter.GetWorkloadIndex(wl)
+	return memberIndex >= 0 && wlIndex >= 0 && memberIndex < wlIndex
+}
+
+func (w *wlReconciler) allExpectedWorkloadsExist(ctx context.Context, wl *kueue.Workload, adapter jobframework.MultiKueueAdapter, actualCount int) (bool, error) {
+	multiWorkloadAdapter, ok := adapter.(jobframework.MultiKueueMultiWorkloadAdapter)
+	if !ok {
+		return true, nil
+	}
+
+	ownerName := wl.Annotations[constants.JobOwnerNameAnnotation]
+	if ownerName == "" {
+		return true, nil
+	}
+
+	expectedCount, err := multiWorkloadAdapter.GetExpectedWorkloadCount(ctx, w.client, types.NamespacedName{
+		Name:      ownerName,
+		Namespace: wl.Namespace,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return actualCount >= expectedCount, nil
+}
+
+func (w *wlReconciler) enqueueComponentWorkloads(ctx context.Context, wl *kueue.Workload) {
+	log := ctrl.LoggerFrom(ctx)
+
+	componentWorkloads, err := w.listComponentWorkloads(ctx, wl)
+	if err != nil || componentWorkloads == nil {
+		return
+	}
+	for i := range componentWorkloads.Items {
+		member := &componentWorkloads.Items[i]
+		if member.Name != wl.Name {
+			log.V(3).Info("Enqueueing component workload", "member", klog.KObj(member))
+			w.clusters.wlUpdateCh <- event.GenericEvent{Object: member}
+		}
+	}
+}
+
+func (w *wlReconciler) syncToSingleCluster(ctx context.Context, log klog.Logger, group *wlGroup, targetCluster string) (reconcile.Result, error) {
+	var errs []error
+
+	for clusterName, remoteWl := range group.remotes {
+		if clusterName == targetCluster {
+			if remoteWl == nil {
+				clone := cloneForCreate(group.local, group.remoteClients[clusterName].origin, false)
+				if err := group.remoteClients[clusterName].client.Create(ctx, clone); err != nil {
+					log.V(2).Error(err, "creating remote workload", "cluster", clusterName)
+					errs = append(errs, err)
+				}
+			}
+			continue
+		}
+
+		if remoteWl != nil {
+			if err := client.IgnoreNotFound(group.RemoveRemoteObjects(ctx, clusterName)); err != nil {
+				log.V(2).Error(err, "removing remote workload", "cluster", clusterName)
+				errs = append(errs, err)
+			}
+			group.remotes[clusterName] = nil
+		}
+	}
+
+	return reconcile.Result{}, errors.Join(errs...)
 }
 
 func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group *wlGroup) (reconcile.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("op", "nominateAndSynchronizeWorkers")
 	log.V(3).Info("Nominate and Synchronize Worker Clusters")
+
+	componentWorkloads, err := w.listComponentWorkloads(ctx, group.local)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if _, ok := group.jobAdapter.(jobframework.MultiKueueMultiWorkloadAdapter); ok && componentWorkloads != nil {
+		allExist, err := w.allExpectedWorkloadsExist(ctx, group.local, group.jobAdapter, len(componentWorkloads.Items))
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		if !allExist {
+			log.V(3).Info("Waiting for all component workloads to exist")
+			return reconcile.Result{}, nil
+		}
+		w.enqueueComponentWorkloads(ctx, group.local)
+	}
+
+	assignedWorkerCluster, err := w.getComponentWorkloadsClusterName(ctx, group.local, componentWorkloads)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("checking component workloads: %w", err)
+	}
+	isPrimary := isPrimaryComponentWorkload(group.local, group.jobAdapter, componentWorkloads)
+
+	if assignedWorkerCluster != "" {
+		log.V(3).Info("Using cluster from component workloads", "cluster", assignedWorkerCluster)
+		if _, ok := group.remotes[assignedWorkerCluster]; ok {
+			if !slices.Contains(group.local.Status.NominatedClusterNames, assignedWorkerCluster) {
+				if err := workload.PatchAdmissionStatus(ctx, w.client, group.local, w.clock, func(wl *kueue.Workload) (bool, error) {
+					wl.Status.NominatedClusterNames = []string{assignedWorkerCluster}
+					return true, nil
+				}); err != nil {
+					return reconcile.Result{}, err
+				}
+			}
+			return w.syncToSingleCluster(ctx, log, group, assignedWorkerCluster)
+		}
+		log.V(3).Info("Worker cluster not available", "cluster", assignedWorkerCluster)
+		return reconcile.Result{}, fmt.Errorf("assigned worker cluster %q is not available", assignedWorkerCluster)
+	}
+
+	if !isPrimary {
+		log.V(3).Info("Waiting for primary workload to nominate cluster")
+		return reconcile.Result{}, nil
+	}
+
 	var nominatedWorkers []string
 
 	// For elastic workloads, retrieve the remote cluster where the original workload was scheduled.
@@ -523,7 +778,7 @@ func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group 
 	for rem, remoteWl := range group.remotes {
 		if slices.Contains(nominatedWorkers, rem) {
 			if remoteWl == nil {
-				clone := cloneForCreate(group.local, group.remoteClients[rem].origin)
+				clone := cloneForCreate(group.local, group.remoteClients[rem].origin, true)
 				if err := group.remoteClients[rem].client.Create(ctx, clone); err != nil {
 					log.V(2).Error(err, "creating remote object", "remote", rem)
 					errs = append(errs, err)
@@ -725,7 +980,13 @@ func (w *wlReconciler) syncReservingRemoteState(ctx context.Context, group *wlGr
 
 			workload.SetAdmissionCheckState(&wl.Status.AdmissionChecks, *acs, w.clock)
 			// Set the cluster name to the reserving remote and clear the nominated clusters.
-			wl.Status.ClusterName = &reservingRemote
+			// Only set ClusterName if not already set, as it is immutable once set.
+			if wl.Status.ClusterName == nil {
+				wl.Status.ClusterName = &reservingRemote
+			} else if *wl.Status.ClusterName != reservingRemote {
+				return false, fmt.Errorf("attempting to change immutable ClusterName from %q to %q",
+					*wl.Status.ClusterName, reservingRemote)
+			}
 			wl.Status.NominatedClusterNames = nil
 		}
 
@@ -737,6 +998,7 @@ func (w *wlReconciler) syncReservingRemoteState(ctx context.Context, group *wlGr
 
 	if needsACUpdate {
 		w.recorder.Eventf(group.local, corev1.EventTypeNormal, "MultiKueue", acs.Message)
+		w.enqueueComponentWorkloads(ctx, group.local)
 	}
 
 	return nil
@@ -764,7 +1026,70 @@ func updateDelayedTopologyRequest(local, remote *kueue.Workload) {
 	}
 }
 
-func cloneForCreate(orig *kueue.Workload, origin string) *kueue.Workload {
+func (w *wlReconciler) workloadToOpenPreemptionGate(ctx context.Context, group *wlGroup) (*string, time.Duration) {
+	log := ctrl.LoggerFrom(ctx).WithValues("op", "workloadToOpenPreemptionGate")
+
+	var previousUngateTime *metav1.Time
+	var oldestPreemptionSignalTime *metav1.Time
+	var workloadToUngateClusterName *string
+
+	for clusterName, wl := range group.remotes {
+		remoteWlLog := log.WithValues("remoteCluster", clusterName, "remoteWorkload", klog.KObj(wl))
+		if wl == nil {
+			continue
+		}
+		openMkGateStateIdx := slices.IndexFunc(wl.Status.PreemptionGates, func(gate kueue.PreemptionGateState) bool {
+			return gate.Name == constants.MultiKueuePreemptionGate && gate.Position == kueue.PreemptionGatePositionOpen
+		})
+		if openMkGateStateIdx == -1 {
+			remoteWlLog.V(4).Info("Remote workload does not have an open preemption gate")
+			preemptionSignalCond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadBlockedOnPreemptionGates)
+			wlRequiresPreemption := preemptionSignalCond != nil && preemptionSignalCond.Status == metav1.ConditionTrue
+			if !wlRequiresPreemption {
+				remoteWlLog.V(4).Info("Remote workload does not require preemption")
+				continue
+			}
+			wlHasOlderPreemptionSignal := oldestPreemptionSignalTime == nil || preemptionSignalCond.LastTransitionTime.Before(oldestPreemptionSignalTime)
+			if !wlHasOlderPreemptionSignal {
+				remoteWlLog.V(4).Info("Remote workload was not the first to require preemption")
+				continue
+			}
+
+			remoteWlLog.V(4).Info("Remote workload is the new candidate for ungating")
+			workloadToUngateClusterName = &clusterName
+			oldestPreemptionSignalTime = &preemptionSignalCond.LastTransitionTime
+		} else {
+			remoteWlLog.V(4).Info("Remote workload has an open preemption gate")
+			openMkGateState := wl.Status.PreemptionGates[openMkGateStateIdx]
+			gateOpenedTime := openMkGateState.LastTransitionTime
+			if previousUngateTime == nil || gateOpenedTime.After(previousUngateTime.Time) {
+				remoteWlLog.V(4).Info("Remote workload has the new latest preemption ungating time")
+				previousUngateTime = &gateOpenedTime
+			}
+		}
+	}
+
+	var timeSinceUngate time.Duration
+	if previousUngateTime == nil {
+		timeSinceUngate = 0
+	} else {
+		timeSinceUngate = w.clock.Now().Sub(previousUngateTime.Time)
+	}
+	timeLeftInTimeout := singleClusterPreemptionTimeout - timeSinceUngate
+
+	if workloadToUngateClusterName == nil {
+		log.V(4).Info("No candidate workload found for ungating preemptions")
+		return nil, 0
+	}
+	if previousUngateTime != nil && timeLeftInTimeout > 0 {
+		log.V(4).Info("Single preemption timeout did not expire", "timeLeft", timeLeftInTimeout, "nextRemoteToUngate", workloadToUngateClusterName)
+		return nil, timeLeftInTimeout
+	}
+	log.V(4).Info("Found workload to ungate", "remoteToUngate", workloadToUngateClusterName)
+	return workloadToUngateClusterName, singleClusterPreemptionTimeout
+}
+
+func cloneForCreate(orig *kueue.Workload, origin string, preemptionGated bool) *kueue.Workload {
 	remoteWl := &kueue.Workload{}
 	remoteWl.ObjectMeta = api.CloneObjectMetaForCreation(&orig.ObjectMeta)
 	if remoteWl.Labels == nil {
@@ -772,5 +1097,11 @@ func cloneForCreate(orig *kueue.Workload, origin string) *kueue.Workload {
 	}
 	remoteWl.Labels[kueue.MultiKueueOriginLabel] = origin
 	orig.Spec.DeepCopyInto(&remoteWl.Spec)
+
+	if features.Enabled(features.MultiKueueOrchestratedPreemption) && preemptionGated {
+		mkPreemptionGate := kueue.PreemptionGate{Name: constants.MultiKueuePreemptionGate}
+		remoteWl.Spec.PreemptionGates = append(remoteWl.Spec.PreemptionGates, mkPreemptionGate)
+	}
+
 	return remoteWl
 }

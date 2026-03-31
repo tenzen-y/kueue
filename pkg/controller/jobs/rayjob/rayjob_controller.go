@@ -19,6 +19,7 @@ package rayjob
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	rayutils "github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
@@ -28,13 +29,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/utils/ptr"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	"sigs.k8s.io/kueue/pkg/controller/jobs/ray"
+	"sigs.k8s.io/kueue/pkg/controller/jobs/raycluster"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
+	"sigs.k8s.io/kueue/pkg/util/roletracker"
 )
 
 var (
@@ -50,12 +58,12 @@ const (
 func init() {
 	utilruntime.Must(jobframework.RegisterIntegration(FrameworkName, jobframework.IntegrationCallbacks{
 		SetupIndexes:      SetupIndexes,
-		NewJob:            NewJob,
+		NewJob:            newJob,
 		NewReconciler:     NewReconciler,
 		SetupWebhook:      SetupRayJobWebhook,
 		JobType:           &rayv1.RayJob{},
 		AddToScheme:       rayv1.AddToScheme,
-		MultiKueueAdapter: &multiKueueAdapter{},
+		MultiKueueAdapter: ray.NewMKAdapter(copyJobSpec, copyJobStatus, getEmptyList, gvk, getManagedBy, setManagedBy),
 	}))
 }
 
@@ -63,23 +71,59 @@ func init() {
 // +kubebuilder:rbac:groups=ray.io,resources=rayjobs,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=ray.io,resources=rayjobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ray.io,resources=rayjobs/finalizers,verbs=get;update
+// +kubebuilder:rbac:groups=ray.io,resources=rayclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=resourceflavors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloadpriorityclasses,verbs=get;list;watch
 
-func NewJob() jobframework.GenericJob {
+type rayJobReconciler struct {
+	jr     *jobframework.JobReconciler
+	client client.Client
+}
+
+func newJob() jobframework.GenericJob {
 	return &RayJob{}
 }
 
-var NewReconciler = jobframework.NewGenericReconcilerFactory(NewJob)
+func setup(b *builder.Builder, c client.Client) *builder.Builder {
+	return b.Watches(&rayv1.RayCluster{}, handler.EnqueueRequestForOwner(c.Scheme(), c.RESTMapper(), &rayv1.RayJob{}, handler.OnlyControllerOwner()))
+}
+
+var reconciler rayJobReconciler
+
+func NewReconciler(ctx context.Context, client client.Client, indexer client.FieldIndexer, eventRecorder record.EventRecorder, opts ...jobframework.Option) (jobframework.JobReconcilerInterface, error) {
+	reconciler = rayJobReconciler{
+		jr:     jobframework.NewReconciler(client, eventRecorder, opts...),
+		client: client,
+	}
+	return &reconciler, nil
+}
+
+func (r *rayJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	return r.jr.ReconcileGenericJob(ctx, req, newJob())
+}
+
+func (r *rayJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	controllerName := strings.ToLower(newJob().GVK().Kind)
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(newJob().Object()).Owns(&kueue.Workload{}).
+		WithOptions(controller.Options{
+			LogConstructor: roletracker.NewLogConstructor(r.jr.RoleTracker(), controllerName),
+		})
+	c := mgr.GetClient()
+	b = setup(b, c)
+	return b.Complete(r)
+}
 
 type RayJob rayv1.RayJob
 
 var _ jobframework.GenericJob = (*RayJob)(nil)
 var _ jobframework.JobWithManagedBy = (*RayJob)(nil)
 var _ jobframework.JobWithSkip = (*RayJob)(nil)
+var _ jobframework.JobWithCustomAnnotations = (*RayJob)(nil)
+var _ jobframework.ElasticWorkloadNameProvider = (*RayJob)(nil)
 
 func (j *RayJob) Object() client.Object {
 	return (*rayv1.RayJob)(j)
@@ -105,16 +149,7 @@ func (j *RayJob) Suspend() {
 func (j *RayJob) Skip(ctx context.Context) bool {
 	// Skip reconciliation for RayJobs that use clusterSelector to reference existing clusters.
 	// These jobs are not managed by Kueue.
-	if len(j.Spec.ClusterSelector) > 0 {
-		return true
-	}
-	// Short term solution to support RayJob InTreeAutoscaling: https://github.com/kubernetes-sigs/kueue/issues/7605
-	if j.Spec.RayClusterSpec != nil &&
-		ptr.Deref(j.Spec.RayClusterSpec.EnableInTreeAutoscaling, false) &&
-		jobframework.WorkloadSliceEnabled(j) {
-		return true
-	}
-	return false
+	return len(j.Spec.ClusterSelector) > 0
 }
 
 func (j *RayJob) GVK() schema.GroupVersionKind {
@@ -129,67 +164,21 @@ func (j *RayJob) PodLabelSelector() string {
 }
 
 func (j *RayJob) PodSets(ctx context.Context) ([]kueue.PodSet, error) {
-	podSets := make([]kueue.PodSet, 0)
-
-	// head
-	headPodSet := kueue.PodSet{
-		Name:     headGroupPodSetName,
-		Template: *j.Spec.RayClusterSpec.HeadGroupSpec.Template.DeepCopy(),
-		Count:    1,
-	}
-	if features.Enabled(features.TopologyAwareScheduling) {
-		topologyRequest, err := jobframework.NewPodSetTopologyRequest(
-			&j.Spec.RayClusterSpec.HeadGroupSpec.Template.ObjectMeta).Build()
-		if err != nil {
-			return nil, err
-		}
-		headPodSet.TopologyRequest = topologyRequest
-	}
-	podSets = append(podSets, headPodSet)
-
-	// workers
-	for index := range j.Spec.RayClusterSpec.WorkerGroupSpecs {
-		wgs := &j.Spec.RayClusterSpec.WorkerGroupSpecs[index]
-		count := int32(1)
-		if wgs.Replicas != nil {
-			count = *wgs.Replicas
-		}
-		if wgs.NumOfHosts > 1 {
-			count *= wgs.NumOfHosts
-		}
-		workerPodSet := kueue.PodSet{
-			Name:     kueue.NewPodSetReference(wgs.GroupName),
-			Template: *wgs.Template.DeepCopy(),
-			Count:    count,
-		}
-		if features.Enabled(features.TopologyAwareScheduling) {
-			topologyRequest, err := jobframework.NewPodSetTopologyRequest(&wgs.Template.ObjectMeta).Build()
-			if err != nil {
-				return nil, err
-			}
-			workerPodSet.TopologyRequest = topologyRequest
-		}
-		podSets = append(podSets, workerPodSet)
+	// Always build PodSets from RayJob spec first
+	podSets, err := raycluster.BuildPodSets(j.Spec.RayClusterSpec)
+	if err != nil {
+		return nil, err
 	}
 
-	// submitter Job
-	if j.Spec.SubmissionMode == rayv1.K8sJobMode {
-		submitterJobPodSet := kueue.PodSet{
-			Name:     submitterJobPodSetName,
-			Count:    1,
-			Template: *getSubmitterTemplate(j),
-		}
+	podSets, err = j.addSubmitterPodSet(podSets)
+	if err != nil {
+		return nil, err
+	}
 
-		// Create the TopologyRequest for the Submitter Job PodSet, based on the annotations
-		// in rayJob.Spec.SubmitterPodTemplate, which can be specified by the user.
-		if features.Enabled(features.TopologyAwareScheduling) {
-			topologyRequest, err := jobframework.NewPodSetTopologyRequest(&submitterJobPodSet.Template.ObjectMeta).Build()
-			if err != nil {
-				return nil, err
-			}
-			submitterJobPodSet.TopologyRequest = topologyRequest
-		}
-		podSets = append(podSets, submitterJobPodSet)
+	rayClusterName := j.Status.RayClusterName
+	podSets, err = raycluster.UpdatePodSets(ctx, podSets, reconciler.client, j.Object(), j.Spec.RayClusterSpec.EnableInTreeAutoscaling, rayClusterName)
+	if err != nil {
+		return nil, err
 	}
 
 	return podSets, nil
@@ -207,20 +196,9 @@ func (j *RayJob) RunWithPodSetsInfo(ctx context.Context, podSetsInfo []podset.Po
 
 	j.Spec.Suspend = false
 
-	// head
-	headPod := &j.Spec.RayClusterSpec.HeadGroupSpec.Template
-	info := podSetsInfo[0]
-	if err := podset.Merge(&headPod.ObjectMeta, &headPod.Spec, info); err != nil {
+	err := raycluster.UpdateRayClusterSpecToRunWithPodSetsInfo(j.Spec.RayClusterSpec, podSetsInfo)
+	if err != nil {
 		return err
-	}
-
-	// workers
-	for index := range j.Spec.RayClusterSpec.WorkerGroupSpecs {
-		workerPod := &j.Spec.RayClusterSpec.WorkerGroupSpecs[index].Template
-		info := podSetsInfo[index+1]
-		if err := podset.Merge(&workerPod.ObjectMeta, &workerPod.Spec, info); err != nil {
-			return err
-		}
 	}
 
 	// submitter
@@ -245,16 +223,7 @@ func (j *RayJob) RestorePodSetsInfo(podSetsInfo []podset.PodSetInfo) bool {
 		return false
 	}
 
-	// head
-	headPod := &j.Spec.RayClusterSpec.HeadGroupSpec.Template
-	changed := podset.RestorePodSpec(&headPod.ObjectMeta, &headPod.Spec, podSetsInfo[0])
-
-	// workers
-	for index := range j.Spec.RayClusterSpec.WorkerGroupSpecs {
-		workerPod := &j.Spec.RayClusterSpec.WorkerGroupSpecs[index].Template
-		info := podSetsInfo[index+1]
-		changed = podset.RestorePodSpec(&workerPod.ObjectMeta, &workerPod.Spec, info) || changed
-	}
+	changed := raycluster.RestorePodSetsInfo(j.Spec.RayClusterSpec, podSetsInfo)
 
 	// submitter
 	if j.Spec.SubmissionMode == rayv1.K8sJobMode {
@@ -275,6 +244,14 @@ func (j *RayJob) Finished(ctx context.Context) (message string, success, finishe
 
 func (j *RayJob) PodsReady(ctx context.Context) bool {
 	return j.Status.RayClusterStatus.State == rayv1.Ready
+}
+
+func (j *RayJob) GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error) {
+	return raycluster.GetWorkloadslicingRayClusterCustomAnnotations(ctx, c, j.Object(), podSets, j.Status.RayClusterName)
+}
+
+func (j *RayJob) GetWorkloadNameExtraPart() string {
+	return raycluster.GetWorkloadNameExtraPart(j.GetObjectMeta())
 }
 
 func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {
@@ -315,6 +292,31 @@ func getSubmitterTemplate(rayJob *RayJob) *corev1.PodTemplateSpec {
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
+}
+
+// addSubmitterPodSet creates the submitter job PodSet for RayJob and appends it to podSets
+func (j *RayJob) addSubmitterPodSet(podSets []kueue.PodSet) ([]kueue.PodSet, error) {
+	if j.Spec.SubmissionMode != rayv1.K8sJobMode {
+		return podSets, nil
+	}
+
+	submitterJobPodSet := kueue.PodSet{
+		Name:     submitterJobPodSetName,
+		Count:    1,
+		Template: *getSubmitterTemplate(j),
+	}
+
+	// Create the TopologyRequest for the Submitter Job PodSet, based on the annotations
+	// in rayJob.Spec.SubmitterPodTemplate, which can be specified by the user.
+	if features.Enabled(features.TopologyAwareScheduling) {
+		topologyRequest, err := jobframework.NewPodSetTopologyRequest(&submitterJobPodSet.Template.ObjectMeta).Build()
+		if err != nil {
+			return nil, err
+		}
+		submitterJobPodSet.TopologyRequest = topologyRequest
+	}
+
+	return append(podSets, submitterJobPodSet), nil
 }
 
 func (j *RayJob) CanDefaultManagedBy() bool {

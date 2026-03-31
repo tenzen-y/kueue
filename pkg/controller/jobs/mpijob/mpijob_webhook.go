@@ -23,7 +23,6 @@ import (
 
 	"github.com/kubeflow/mpi-operator/pkg/apis/kubeflow/v2beta1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,10 +33,10 @@ import (
 	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
-	"sigs.k8s.io/kueue/pkg/controller/jobframework/webhook"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/kubeversion"
 	"sigs.k8s.io/kueue/pkg/util/podset"
+	"sigs.k8s.io/kueue/pkg/util/webhook"
 )
 
 var (
@@ -71,20 +70,22 @@ func SetupMPIJobWebhook(mgr ctrl.Manager, opts ...jobframework.Option) error {
 		cache:                        options.Cache,
 	}
 	obj := &v2beta1.MPIJob{}
-	return webhook.WebhookManagedBy(mgr).
-		For(obj).
-		WithMutationHandler(admission.WithCustomDefaulter(mgr.GetScheme(), obj, wh)).
+	if options.NoopWebhook {
+		return webhook.SetupNoopWebhook(mgr, obj)
+	}
+	return ctrl.NewWebhookManagedBy(mgr, obj).
+		WithDefaulter(wh).
 		WithValidator(wh).
-		WithRoleTracker(options.RoleTracker).
+		WithLogConstructor(jobframework.WebhookLogConstructor(fromObject(obj).GVK(), options.RoleTracker)).
 		Complete()
 }
 
 // +kubebuilder:webhook:path=/mutate-kubeflow-org-v2beta1-mpijob,mutating=true,failurePolicy=fail,sideEffects=None,groups=kubeflow.org,resources=mpijobs,verbs=create,versions=v2beta1,name=mmpijob.kb.io,admissionReviewVersions=v1
 
-var _ admission.CustomDefaulter = &MpiJobWebhook{}
+var _ admission.Defaulter[*v2beta1.MPIJob] = &MpiJobWebhook{}
 
 // Default implements webhook.CustomDefaulter so a webhook will be registered for the type
-func (w *MpiJobWebhook) Default(ctx context.Context, obj runtime.Object) error {
+func (w *MpiJobWebhook) Default(ctx context.Context, obj *v2beta1.MPIJob) error {
 	mpiJob := fromObject(obj)
 	log := ctrl.LoggerFrom(ctx).WithName("mpijob-webhook")
 	log.V(5).Info("Applying defaults")
@@ -117,10 +118,10 @@ func (w *MpiJobWebhook) Default(ctx context.Context, obj runtime.Object) error {
 
 // +kubebuilder:webhook:path=/validate-kubeflow-org-v2beta1-mpijob,mutating=false,failurePolicy=fail,sideEffects=None,groups=kubeflow.org,resources=mpijobs,verbs=create;update,versions=v2beta1,name=vmpijob.kb.io,admissionReviewVersions=v1
 
-var _ admission.CustomValidator = &MpiJobWebhook{}
+var _ admission.Validator[*v2beta1.MPIJob] = &MpiJobWebhook{}
 
-// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
-func (w *MpiJobWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
+func (w *MpiJobWebhook) ValidateCreate(ctx context.Context, obj *v2beta1.MPIJob) (admission.Warnings, error) {
 	mpiJob := fromObject(obj)
 	log := ctrl.LoggerFrom(ctx).WithName("mpijob-webhook")
 	log.Info("Validating create")
@@ -135,7 +136,7 @@ func (w *MpiJobWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) 
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
-func (w *MpiJobWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *MpiJobWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj *v2beta1.MPIJob) (admission.Warnings, error) {
 	oldMpiJob := fromObject(oldObj)
 	newMpiJob := fromObject(newObj)
 	log := ctrl.LoggerFrom(ctx).WithName("mpijob-webhook")
@@ -152,8 +153,8 @@ func (w *MpiJobWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runti
 	return nil, allErrs.ToAggregate()
 }
 
-// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
-func (w *MpiJobWebhook) ValidateDelete(context.Context, runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
+func (w *MpiJobWebhook) ValidateDelete(context.Context, *v2beta1.MPIJob) (admission.Warnings, error) {
 	return nil, nil
 }
 

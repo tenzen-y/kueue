@@ -170,6 +170,21 @@ type JobWithManagedBy interface {
 	SetManagedBy(*string)
 }
 
+// JobWithCustomAnnotations interface should be implemented by generic jobs
+// when custom annotations should be updated to API server when there is change.
+// An example is RayJob may have "kueue.x-k8s.io/podset-replica-sizes", which reflects the current replica sizes from
+// underlying RayCluster. Job reconciler will call this method `UpdateAnnotations` to update such annotations to API Server.
+type JobWithCustomAnnotations interface {
+	// GetCustomAnnotations gets extra annotations needed to be added to the job
+	GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error)
+}
+
+// ElasticWorkloadNameProvider interface contains method to provide extra information to build workload name for elastic job
+type ElasticWorkloadNameProvider interface {
+	// GetWorkloadNameExtraPart gets extra information to build workload name
+	GetWorkloadNameExtraPart() string
+}
+
 // TopLevelJob interface is an optional interface used to indicate
 // that the Job owns/manages the Workload object, regardless of the Job
 // owner references.
@@ -255,8 +270,18 @@ type MultiKueueAdapter interface {
 type MultiKueueWatcher interface {
 	// GetEmptyList returns an empty list of objects
 	GetEmptyList() client.ObjectList
-	// WorkloadKeyFor returns the key of the workload of interest
+	// WorkloadKeysFor returns the keys of the workloads of interest
 	// - the object name for workloads
-	// - the prebuilt workload for job types
-	WorkloadKeyFor(runtime.Object) (types.NamespacedName, error)
+	// - the prebuilt workload(s) for job types
+	WorkloadKeysFor(runtime.Object) ([]types.NamespacedName, error)
+}
+
+// MultiKueueMultiWorkloadAdapter is an optional interface for MultiKueue adapters
+// whose jobs create multiple workloads (e.g., LeaderWorkerSet creates one workload per replica).
+type MultiKueueMultiWorkloadAdapter interface {
+	// GetExpectedWorkloadCount returns the number of workloads the job creates.
+	GetExpectedWorkloadCount(ctx context.Context, c client.Client, key types.NamespacedName) (int, error)
+	// GetWorkloadIndex extracts the numeric index from the workload for ordering.
+	// Returns -1 if the index cannot be determined.
+	GetWorkloadIndex(wl *kueue.Workload) int
 }

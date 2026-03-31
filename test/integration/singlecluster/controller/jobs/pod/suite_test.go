@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/tas"
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/scheduler"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	"sigs.k8s.io/kueue/pkg/util/kubeversion"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
@@ -72,6 +73,11 @@ var _ = ginkgo.AfterSuite(func() {
 	fwk.Teardown()
 })
 
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+})
+
 func managerSetup(
 	setupTASControllers bool,
 	enableScheduler bool,
@@ -84,16 +90,21 @@ func managerSetup(
 	if configuration.WaitForPodsReady != nil {
 		opts = append(opts, jobframework.WithWaitForPodsReady(configuration.WaitForPodsReady))
 	}
+	preemptionExpectations := preemptexpectations.New()
 	var queueOptions []qcache.Option
 	if configuration.Resources != nil && len(configuration.Resources.ExcludeResourcePrefixes) > 0 {
 		queueOptions = append([]qcache.Option{}, qcache.WithExcludedResourcePrefixes(configuration.Resources.ExcludeResourcePrefixes))
 	}
+	queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
 	return func(ctx context.Context, mgr manager.Manager) {
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		err = pod.SetupIndexes(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		cCache := schdcache.New(mgr.GetClient())
+		opts = append(opts, jobframework.WithCache(cCache))
 
 		podReconciler, err := pod.NewReconciler(
 			ctx,
@@ -119,13 +130,12 @@ func managerSetup(
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		jobframework.EnableIntegration(job.FrameworkName)
 
-		cCache := schdcache.New(mgr.GetClient())
-		queues := qcache.NewManager(mgr.GetClient(), cCache, queueOptions...)
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 		opts = append(opts, jobframework.WithQueues(queues), jobframework.WithCache(cCache))
 
 		mgr.GetScheme().Default(configuration)
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		err = job.SetupWebhook(mgr, opts...)
@@ -144,7 +154,7 @@ func managerSetup(
 		}
 
 		if enableScheduler {
-			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName))
+			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
 			err := sched.Start(ctx)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}

@@ -47,4 +47,31 @@ const (
 	// of the PodSet of the admitted Workload corresponding to the PodTemplate.
 	// The label is set when starting the Job, and removed on stopping the Job.
 	PodSetLabel = "kueue.x-k8s.io/podset"
+
+	// ClusterQueueLabel is a pod label indicating the name of the ClusterQueue
+	// which admitted the corresponding Kueue's workload.
+	// It can be used, for example, to aggregate the actual resource usage (cpu/mem)
+	// coming from workloads admitted to a given ClusterQueue.
+	//
+	// This label requires AssignQueueLabelsForPods feature, enabled by default.
+	//
+	// Warning: This label is added only if cluster queue name is a valid label value.
+	// For limitations see Kubernetes [documentation](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set)
+	ClusterQueueLabel = "kueue.x-k8s.io/cluster-queue-name"
+
+	// LocalQueueLabel is a pod label indicating the name of the LocalQueue
+	// which admitted the corresponding Kueue's workload.
+	// It can be used, for example, to aggregate the actual resource usage (cpu/mem)
+	// coming from workloads admitted to a given LocalQueue.
+	//
+	// This label requires AssignQueueLabelsForPods feature, enabled by default.
+	LocalQueueLabel = "kueue.x-k8s.io/local-queue-name"
+
+	// AdmissionGatedByAnnotation is the annotation key for gating admission.
+	// When present on a Job, Kueue will not admit the corresponding Workload
+	// until the annotation is removed. The value is a comma-separated list of
+	// controller names (e.g., "example.com/controller1,example.com/controller2").
+	//
+	// This annotation is alpha-level and requires the AdmissionGatedBy feature gate, disabled by default.
+	AdmissionGatedByAnnotation = "kueue.x-k8s.io/admission-gated-by"
 )

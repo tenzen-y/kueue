@@ -31,6 +31,7 @@ import (
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	"sigs.k8s.io/kueue/pkg/controller/jobs/ray"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/podset"
 )
@@ -52,7 +53,7 @@ func init() {
 		SetupWebhook:      SetupRayClusterWebhook,
 		JobType:           &rayv1.RayCluster{},
 		AddToScheme:       rayv1.AddToScheme,
-		MultiKueueAdapter: &multiKueueAdapter{},
+		MultiKueueAdapter: ray.NewMKAdapter(copyJobSpec, copyJobStatus, getEmptyList, gvk, getManagedBy, setManagedBy),
 	}))
 }
 
@@ -95,13 +96,6 @@ func (j *RayCluster) Suspend() {
 
 func (j *RayCluster) GVK() schema.GroupVersionKind {
 	return gvk
-}
-
-func (j *RayCluster) IsTopLevel() bool {
-	// Short term solution to support RayJob InTreeAutoscaling: https://github.com/kubernetes-sigs/kueue/issues/7605
-	return ptr.Deref(j.Spec.EnableInTreeAutoscaling, false) &&
-		jobframework.WorkloadSliceEnabled(j) &&
-		j.Labels[rayutils.RayOriginatedFromCRDLabelKey] == string(rayutils.RayJobCRD)
 }
 
 func (j *RayCluster) PodLabelSelector() string {
@@ -163,22 +157,11 @@ func (j *RayCluster) RunWithPodSetsInfo(ctx context.Context, podSetsInfo []podse
 
 	j.Spec.Suspend = ptr.To(false)
 
-	// head
-	headPod := &j.Spec.HeadGroupSpec.Template
-	info := podSetsInfo[0]
-	if err := podset.Merge(&headPod.ObjectMeta, &headPod.Spec, info); err != nil {
+	err := UpdateRayClusterSpecToRunWithPodSetsInfo(&j.Spec, podSetsInfo)
+	if err != nil {
 		return err
 	}
 
-	// workers
-	for index := range j.Spec.WorkerGroupSpecs {
-		workerPod := &j.Spec.WorkerGroupSpecs[index].Template
-
-		info := podSetsInfo[index+1]
-		if err := podset.Merge(&workerPod.ObjectMeta, &workerPod.Spec, info); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -187,17 +170,7 @@ func (j *RayCluster) RestorePodSetsInfo(podSetsInfo []podset.PodSetInfo) bool {
 		return false
 	}
 
-	// head
-	headPod := &j.Spec.HeadGroupSpec.Template
-	changed := podset.RestorePodSpec(&headPod.ObjectMeta, &headPod.Spec, podSetsInfo[0])
-
-	// workers
-	for index := range j.Spec.WorkerGroupSpecs {
-		workerPod := &j.Spec.WorkerGroupSpecs[index].Template
-		info := podSetsInfo[index+1]
-		changed = podset.RestorePodSpec(&workerPod.ObjectMeta, &workerPod.Spec, info) || changed
-	}
-	return changed
+	return RestorePodSetsInfo(&j.Spec, podSetsInfo)
 }
 
 func (j *RayCluster) Finished(ctx context.Context) (message string, success, finished bool) {

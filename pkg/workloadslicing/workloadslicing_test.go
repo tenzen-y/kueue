@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/component-base/featuregate"
 	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -736,7 +737,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 						Creation(fiveMinutesAgo).
 						PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).Request(corev1.ResourceCPU, "1").Obj()).
 						ReserveQuotaAt(utiltestingapi.MakeAdmission("default").PodSets(utiltestingapi.MakePodSetAssignment(kueue.DefaultPodSetName).Assignment(corev1.ResourceCPU, "default", "1").Obj()).Obj(), now).
-						Evicted().
+						EvictedAt(now).
 						Obj(),
 					utiltestingapi.MakeWorkload(testJobObject.Name+"-2", testJobObject.Namespace).
 						OwnerReference(testJobGVK, testJobObject.Name, string(testJobObject.UID)).
@@ -943,7 +944,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			ctx, _ := utiltesting.ContextWithLog(t)
-			gotWorkload, gotCompatible, gotError := EnsureWorkloadSlices(ctx, tt.args.clnt, fakeClock, tt.args.jobPodSets, tt.args.jobObject, tt.args.jobObjectGVK, nil)
+			gotWorkload, gotCompatible, gotError := EnsureWorkloadSlices(ctx, tt.args.clnt, fakeClock, tt.args.jobPodSets, tt.args.jobObject, tt.args.jobObjectGVK)
 			if (gotError != nil) != tt.want.error {
 				t.Errorf("EnsureWorkloadSlices() error = %v, wantErr %v", gotError, tt.want.error)
 				return
@@ -1150,29 +1151,31 @@ func TestReplacedWorkloadSlice(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		featureEnabled bool
-		args           args
-		want           want
+		featureGates map[featuregate.Feature]bool
+		args         args
+		want         want
 	}{
-		"FeatureNotEnabled": {},
+		"FeatureNotEnabled": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: false},
+		},
 		"EdgeCase_WorkloadIsNil": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 		},
 		"EdgeCase_SnapshotIsNil": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			args: args{
 				wl: workload.NewInfo(utiltestingapi.MakeWorkload("test", "default").Obj()),
 			},
 		},
 		"WorkloadWithoutReplacementAnnotation": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			args: args{
 				wl:   workload.NewInfo(utiltestingapi.MakeWorkload("test", "default").Obj()),
 				snap: &schdcache.Snapshot{},
 			},
 		},
 		"ReplacedWorkloadIsNotFound_MissingClusterQueue": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			args: args{
 				wl: workload.NewInfo(utiltestingapi.MakeWorkload("test-new", "default").
 					Annotation(WorkloadSliceReplacementFor, "test-old").
@@ -1185,7 +1188,7 @@ func TestReplacedWorkloadSlice(t *testing.T) {
 			},
 		},
 		"EdgeCase_ReplacedWorkloadIsNotFound_NotInClusterQueue": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			args: args{
 				wl: workload.NewInfo(utiltestingapi.MakeWorkload("test-new", "default").
 					Annotation(WorkloadSliceReplacementFor, "test-old").
@@ -1201,7 +1204,7 @@ func TestReplacedWorkloadSlice(t *testing.T) {
 			},
 		},
 		"ReplacedWorkloadIsFound": {
-			featureEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			args: args{
 				wl: workload.NewInfo(utiltestingapi.MakeWorkload("test-new", "default").
 					Annotation(WorkloadSliceReplacementFor, "test-old").
@@ -1229,7 +1232,7 @@ func TestReplacedWorkloadSlice(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, tt.featureEnabled)
+			features.SetFeatureGatesDuringTest(t, tt.featureGates)
 			targets, wl := ReplacedWorkloadSlice(tt.args.wl, tt.args.snap)
 			if diff := cmp.Diff(tt.want.targets, targets); diff != "" {
 				t.Errorf("ReplacedWorkloadSlice() targets (+want,-got):\n%s", diff)

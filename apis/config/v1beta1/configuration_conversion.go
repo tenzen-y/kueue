@@ -51,6 +51,10 @@ func Convert_v1beta1_Configuration_To_v1beta2_Configuration(in *Configuration, o
 	return nil
 }
 
+func Convert_v1beta2_Configuration_To_v1beta1_Configuration(in *v1beta2.Configuration, out *Configuration, s conversionapi.Scope) error {
+	return autoConvert_v1beta2_Configuration_To_v1beta1_Configuration(in, out, s)
+}
+
 // Convert_v1beta1_Integrations_To_v1beta2_Integrations is a conversion function that ignores deprecated PodOptions field.
 func Convert_v1beta1_Integrations_To_v1beta2_Integrations(in *Integrations, out *v1beta2.Integrations, s conversionapi.Scope) error {
 	return autoConvert_v1beta1_Integrations_To_v1beta2_Integrations(in, out, s)

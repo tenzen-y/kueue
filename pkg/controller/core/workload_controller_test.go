@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/component-base/featuregate"
 	testingclock "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,11 +44,14 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/dra"
 	"sigs.k8s.io/kueue/pkg/features"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	utilqueue "sigs.k8s.io/kueue/pkg/util/queue"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
+	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/test/util"
 )
 
@@ -401,8 +405,7 @@ func TestReconcile(t *testing.T) {
 	fakeClock := testingclock.NewFakeClock(now)
 
 	cases := map[string]struct {
-		enableObjectRetentionPolicies bool
-		enableDRAFeature              bool
+		featureGates map[featuregate.Feature]bool
 
 		workload                  *kueue.Workload
 		cq                        *kueue.ClusterQueue
@@ -420,7 +423,10 @@ func TestReconcile(t *testing.T) {
 		reconcilerOpts            []Option
 	}{
 		"reconcile DRA ResourceClaim should be rejected as inadmissible": {
-			enableDRAFeature: true,
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        true,
+				features.MultiKueueOrchestratedPreemption: false,
+			},
 			workload: utiltestingapi.MakeWorkload("wlWithDRAResourceClaim", "ns").
 				Queue("lq").
 				PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
@@ -459,7 +465,10 @@ func TestReconcile(t *testing.T) {
 			wantEvents: nil,
 		},
 		"reconcile DRA ResourceClaimTemplate should be pre-processed and queued": {
-			enableDRAFeature:     true,
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        true,
+				features.MultiKueueOrchestratedPreemption: false,
+			},
 			wantDRAResourceTotal: ptr.To(int64(1)),
 			wantWorkloadsInQueue: ptr.To(1),
 			workload: utiltestingapi.MakeWorkload("wlWithDRAResourceClaimTemplate", "ns").
@@ -494,7 +503,10 @@ func TestReconcile(t *testing.T) {
 			wantEvents: nil,
 		},
 		"reconcile DRA ResourceClaimTemplate multi-pod should be pre-processed and queued": {
-			enableDRAFeature:     true,
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        true,
+				features.MultiKueueOrchestratedPreemption: false,
+			},
 			wantDRAResourceTotal: ptr.To(int64(6)),
 			wantWorkloadsInQueue: ptr.To(1),
 			workload: utiltestingapi.MakeWorkload("wlMultiPodDRA", "ns").
@@ -529,7 +541,10 @@ func TestReconcile(t *testing.T) {
 			wantEvents: nil,
 		},
 		"reconcile DRA ResourceClaimTemplate with unmapped device class": {
-			enableDRAFeature: true,
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        true,
+				features.MultiKueueOrchestratedPreemption: false,
+			},
 			workload: utiltestingapi.MakeWorkload("wlUnmappedDRA", "ns").
 				Queue("lq").
 				PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
@@ -578,7 +593,10 @@ func TestReconcile(t *testing.T) {
 			wantEvents:   nil,
 		},
 		"reconcile DRA ResourceClaimTemplate not found should return error": {
-			enableDRAFeature: true,
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        true,
+				features.MultiKueueOrchestratedPreemption: false,
+			},
 			workload: utiltestingapi.MakeWorkload("wlMissingTemplate", "ns").
 				Queue("lq").
 				PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
@@ -2312,7 +2330,6 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		"shouldn't delete the workload because, object retention not configured": {
-			enableObjectRetentionPolicies: true,
 			workload: utiltestingapi.MakeWorkload("wl", "ns").
 				Condition(metav1.Condition{
 					Type:   kueue.WorkloadFinished,
@@ -2331,7 +2348,6 @@ func TestReconcile(t *testing.T) {
 			wantError: nil,
 		},
 		"shouldn't try to delete the workload (no event emitted) because it is already being deleted by kubernetes, object retention configured": {
-			enableObjectRetentionPolicies: true,
 			workload: utiltestingapi.MakeWorkload("wl", "ns").
 				Condition(metav1.Condition{
 					Type:   kueue.WorkloadFinished,
@@ -2346,7 +2362,7 @@ func TestReconcile(t *testing.T) {
 			reconcilerOpts: []Option{
 				WithWorkloadRetention(
 					&workloadRetentionConfig{
-						afterFinished: ptr.To(util.LongTimeout),
+						afterFinished: ptr.To(util.MediumTimeout),
 					},
 				),
 			},
@@ -2354,7 +2370,6 @@ func TestReconcile(t *testing.T) {
 			wantError:    nil,
 		},
 		"shouldn't try to delete the workload because the retention period hasn't elapsed yet, object retention configured": {
-			enableObjectRetentionPolicies: true,
 			workload: utiltestingapi.MakeWorkload("wl", "ns").
 				Condition(metav1.Condition{
 					Type:               kueue.WorkloadFinished,
@@ -2365,12 +2380,12 @@ func TestReconcile(t *testing.T) {
 			reconcilerOpts: []Option{
 				WithWorkloadRetention(
 					&workloadRetentionConfig{
-						afterFinished: ptr.To(util.LongTimeout),
+						afterFinished: ptr.To(util.MediumTimeout),
 					},
 				),
 			},
 			wantResult: reconcile.Result{
-				RequeueAfter: util.LongTimeout - util.Timeout,
+				RequeueAfter: util.MediumTimeout - util.Timeout,
 			},
 			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
 				Condition(metav1.Condition{
@@ -2382,18 +2397,17 @@ func TestReconcile(t *testing.T) {
 			wantError: nil,
 		},
 		"should delete the workload because the retention period has elapsed, object retention configured": {
-			enableObjectRetentionPolicies: true,
 			workload: utiltestingapi.MakeWorkload("wl", "ns").
 				Condition(metav1.Condition{
 					Type:               kueue.WorkloadFinished,
 					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.NewTime(now.Add(-2 * util.LongTimeout)),
+					LastTransitionTime: metav1.NewTime(now.Add(-2 * util.MediumTimeout)),
 				}).
 				Obj(),
 			reconcilerOpts: []Option{
 				WithWorkloadRetention(
 					&workloadRetentionConfig{
-						afterFinished: ptr.To(util.LongTimeout),
+						afterFinished: ptr.To(util.MediumTimeout),
 					},
 				),
 			},
@@ -2565,13 +2579,241 @@ func TestReconcile(t *testing.T) {
 				Obj(),
 			wantResult: reconcile.Result{},
 		},
+		"should synchronize the status of preemption gates": {
+			featureGates: map[featuregate.Feature]bool{
+				features.DynamicResourceAllocation:        false,
+				features.MultiKueueOrchestratedPreemption: true,
+			},
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				PreemptionGates(
+					kueue.PreemptionGate{
+						Name: "synchronized",
+					},
+					kueue.PreemptionGate{
+						Name: "desynchronized-status",
+					}).
+				PreemptionGateStates(
+					kueue.PreemptionGateState{
+						Name:               "synchronized",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+					kueue.PreemptionGateState{
+						Name:               "desynchronized-spec",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+				).
+				Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				PreemptionGates(
+					kueue.PreemptionGate{
+						Name: "synchronized",
+					},
+					kueue.PreemptionGate{
+						Name: "desynchronized-status",
+					}).
+				PreemptionGateStates(
+					kueue.PreemptionGateState{
+						Name:               "synchronized",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+					kueue.PreemptionGateState{
+						Name:               "desynchronized-status",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+				).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadInadmissible,
+					Message: "ClusterQueue cq is inactive",
+				}).
+				Obj(),
+			wantWorkloadUseMergePatch: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				PreemptionGates(
+					kueue.PreemptionGate{
+						Name: "synchronized",
+					},
+					kueue.PreemptionGate{
+						Name: "desynchronized-status",
+					}).
+				PreemptionGateStates(
+					kueue.PreemptionGateState{
+						Name:               "synchronized",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+					kueue.PreemptionGateState{
+						Name:               "desynchronized-status",
+						Position:           kueue.PreemptionGatePositionClosed,
+						LastTransitionTime: metav1.NewTime(now),
+					},
+				).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadInadmissible,
+					Message: "ClusterQueue cq is inactive",
+				}).
+				Obj(),
+			wantResult: reconcile.Result{},
+		},
+		"workload with AdmissionGatedBy annotation should set QuotaReserved condition to AdmissionGated": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Obj(),
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadAdmissionGated,
+					Message: "Admission is gated by: example.com/controller1",
+				}).
+				Obj(),
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Namespace: "ns", Name: "wl"},
+					EventType: corev1.EventTypeNormal,
+					Reason:    "AdmissionGated",
+					Message:   "Workload admission is gated by: example.com/controller1",
+				},
+			},
+			reconcilerOpts: []Option{},
+		},
+		"workload with AdmissionGatedBy annotation removed should clear the gate and emit event": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadAdmissionGated,
+					Message: "Admission is gated by: example.com/controller1",
+				}).
+				Obj(),
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  "Pending",
+					Message: "AdmissionGatedBy cleared, waiting for quota reservation",
+				}).
+				Obj(),
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Namespace: "ns", Name: "wl"},
+					EventType: corev1.EventTypeNormal,
+					Reason:    "AdmissionGateCleared",
+					Message:   "Admission gate cleared, workload is now admissible",
+				},
+			},
+			reconcilerOpts: []Option{},
+		},
+		"workload with multiple AdmissionGatedBy gates should remain gated": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+				Obj(),
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1,example.com/controller2").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadAdmissionGated,
+					Message: "Admission is gated by: example.com/controller1,example.com/controller2",
+				}).
+				Obj(),
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Namespace: "ns", Name: "wl"},
+					EventType: corev1.EventTypeNormal,
+					Reason:    "AdmissionGated",
+					Message:   "Workload admission is gated by: example.com/controller1,example.com/controller2",
+				},
+			},
+			reconcilerOpts: []Option{},
+		},
+		"workload with AdmissionGatedBy should not be admitted even with quota reserved": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1").
+				ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), now).
+				Obj(),
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1").
+				ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), now).
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadAdmissionGated,
+					Message: "Admission is gated by: example.com/controller1",
+				}).
+				Obj(),
+			wantWorkloadUseMergePatch: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Annotation(constants.AdmissionGatedByAnnotation, "example.com/controller1").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadAdmissionGated,
+					Message: "Admission is gated by: example.com/controller1",
+				}).
+				Obj(),
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Namespace: "ns", Name: "wl"},
+					EventType: corev1.EventTypeNormal,
+					Reason:    "AdmissionGated",
+					Message:   "Workload admission is gated by: example.com/controller1",
+				},
+			},
+			reconcilerOpts: []Option{},
+		},
+		"workload without AdmissionGatedBy annotation and no gated condition should not be affected": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Obj(),
+			cq: utiltestingapi.MakeClusterQueue("cq").Obj(),
+			lq: utiltestingapi.MakeLocalQueue("lq", "ns").ClusterQueue("cq").Obj(),
+			wantWorkload: utiltestingapi.MakeWorkload("wl", "ns").
+				Queue("lq").
+				Condition(metav1.Condition{
+					Type:    kueue.WorkloadQuotaReserved,
+					Status:  metav1.ConditionFalse,
+					Reason:  kueue.WorkloadInadmissible,
+					Message: "ClusterQueue cq is inactive",
+				}).
+				Obj(),
+			reconcilerOpts: []Option{},
+		},
 	}
 	for name, tc := range cases {
 		for _, enabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s WorkloadRequestUseMergePatch enabled: %t", name, enabled), func(t *testing.T) {
-				features.SetFeatureGateDuringTest(t, features.ObjectRetentionPolicies, tc.enableObjectRetentionPolicies)
-				features.SetFeatureGateDuringTest(t, features.DynamicResourceAllocation, tc.enableDRAFeature)
+				features.SetFeatureGatesDuringTest(t, tc.featureGates)
 				features.SetFeatureGateDuringTest(t, features.WorkloadRequestUseMergePatch, enabled)
+				features.SetFeatureGateDuringTest(t, features.AdmissionGatedBy, true)
 
 				testWl := tc.workload.DeepCopy()
 				objs := []client.Object{testWl}
@@ -2588,7 +2830,8 @@ func TestReconcile(t *testing.T) {
 				recorder := &utiltesting.EventRecorder{}
 
 				cqCache := schdcache.New(cl)
-				qManager := qcache.NewManager(cl, cqCache)
+				queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptexpectations.New())}
+				qManager := qcache.NewManagerForUnitTests(cl, cqCache, queueOptions...)
 				reconciler := NewWorkloadReconciler(cl, qManager, cqCache, recorder, tc.reconcilerOpts...)
 				// use a fake clock with jitter = 0 to be able to assert on the requeueAt.
 				reconciler.clock = fakeClock
@@ -2682,7 +2925,7 @@ func TestReconcile(t *testing.T) {
 				}
 
 				// For DRA tests, verify that workloads are properly queued/cached
-				if tc.enableDRAFeature && testWl != nil &&
+				if tc.featureGates[features.DynamicResourceAllocation] && testWl != nil &&
 					len(testWl.Spec.PodSets) > 0 &&
 					len(testWl.Spec.PodSets[0].Template.Spec.ResourceClaims) > 0 {
 					workloadKey := client.ObjectKeyFromObject(testWl)
@@ -2732,5 +2975,214 @@ func TestReconcile(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type notification struct {
+	Cq kueue.ClusterQueueReference
+	Lq kueue.LocalQueueName
+}
+
+type workloadUpdateWatcherMock struct {
+	qManager              *qcache.Manager
+	notificationsRecorded []notification
+	testErrors            []error
+}
+
+func mockWorkloadUpdateWatcher(qManager *qcache.Manager) *workloadUpdateWatcherMock {
+	return &workloadUpdateWatcherMock{
+		qManager:              qManager,
+		notificationsRecorded: []notification{},
+		testErrors:            []error{},
+	}
+}
+
+func (w *workloadUpdateWatcherMock) NotifyWorkloadUpdate(oldWl, newWl *kueue.Workload) {
+	if oldWl == nil && newWl == nil {
+		err := stderrors.New("Both workloads were nil")
+		w.testErrors = append(w.testErrors, err)
+		return
+	}
+
+	if newWl != nil {
+		err := fmt.Errorf("Illegal new workload in delete request: want nil, got %v", newWl)
+		w.testErrors = append(w.testErrors, err)
+		return
+	}
+
+	n := notification{
+		Lq: oldWl.Spec.QueueName,
+	}
+	if oldWl.Status.Admission != nil {
+		n.Cq = oldWl.Status.Admission.ClusterQueue
+	} else if cq, ok := w.qManager.ClusterQueueForWorkload(oldWl); ok {
+		n.Cq = cq
+	}
+
+	w.notificationsRecorded = append(w.notificationsRecorded, n)
+}
+
+func TestWorkloadDeletion(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+
+	wlName := "wl"
+	wlNs := "ns"
+
+	pendingWl := utiltestingapi.MakeWorkload(wlName, wlNs).Queue("lq1").Obj()
+	admittedWl := utiltestingapi.MakeWorkload(wlName, wlNs).Queue("lq1").ReserveQuotaAt(&kueue.Admission{
+		ClusterQueue: "cq1",
+	}, now).Condition(metav1.Condition{
+		Type:   kueue.WorkloadPodsReady,
+		Status: metav1.ConditionFalse,
+	}).Obj()
+
+	admittedWlWithDifferentQueues := utiltestingapi.MakeWorkload(wlName, wlNs).Queue("lq2").ReserveQuotaAt(&kueue.Admission{
+		ClusterQueue: "cq2",
+	}, now).Condition(metav1.Condition{
+		Type:   kueue.WorkloadPodsReady,
+		Status: metav1.ConditionFalse,
+	}).Obj()
+
+	noiseWlPending := utiltestingapi.MakeWorkload("other-wl", "other-ns").Queue("lq3").Obj()
+	noiseWlAdmitted := utiltestingapi.MakeWorkload("other-wl", "other-ns").Queue("lq3").ReserveQuotaAt(&kueue.Admission{
+		ClusterQueue: "cq3",
+	}, now).Condition(metav1.Condition{
+		Type:   kueue.WorkloadPodsReady,
+		Status: metav1.ConditionFalse,
+	}).Obj()
+
+	clusterQueues := []*kueue.ClusterQueue{
+		utiltestingapi.MakeClusterQueue("cq1").Obj(),
+		utiltestingapi.MakeClusterQueue("cq2").Obj(),
+		utiltestingapi.MakeClusterQueue("cq3").Obj(),
+	}
+
+	localQueues := []*kueue.LocalQueue{
+		utiltestingapi.MakeLocalQueue("lq1", wlNs).ClusterQueue("cq1").Obj(),
+		utiltestingapi.MakeLocalQueue("lq2", wlNs).ClusterQueue("cq2").Obj(),
+		utiltestingapi.MakeLocalQueue("lq3", "other-ns").ClusterQueue("cq3").Obj(),
+	}
+
+	cases := map[string]struct {
+		wlInQueueCache    *kueue.Workload
+		wlInSchedCache    *kueue.Workload
+		wantNotifications []notification
+	}{
+		"no workloads in either cache": {
+			wlInQueueCache:    nil,
+			wlInSchedCache:    nil,
+			wantNotifications: []notification{},
+		},
+		"workload only in queue cache (doesn't have admissions)": {
+			wlInQueueCache: pendingWl,
+			wlInSchedCache: nil,
+			wantNotifications: []notification{{
+				Cq: "cq1",
+				Lq: "lq1",
+			}},
+		},
+		"workload only in scheduler cache": {
+			wlInQueueCache: nil,
+			wlInSchedCache: admittedWl,
+			wantNotifications: []notification{{
+				Cq: "cq1",
+				Lq: "lq1",
+			}},
+		},
+		"workload present in both caches with same local queue": {
+			wlInQueueCache: pendingWl,
+			wlInSchedCache: admittedWl,
+			wantNotifications: []notification{
+				{
+					Cq: "cq1",
+					Lq: "lq1",
+				},
+			},
+		},
+		"workload present with different queues in each cache": {
+			wlInQueueCache: pendingWl,
+			wlInSchedCache: admittedWlWithDifferentQueues,
+			wantNotifications: []notification{
+				{
+					Cq: "cq2",
+					Lq: "lq2",
+				},
+				{
+					Cq: "cq1",
+					Lq: "lq1",
+				},
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			clientBuilder := utiltesting.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: utiltesting.TreatSSAAsStrategicMerge})
+
+			cl := clientBuilder.Build()
+			recorder := &utiltesting.EventRecorder{}
+			cqCache := schdcache.New(cl)
+			queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptexpectations.New())}
+			qManager := qcache.NewManagerForUnitTests(cl, cqCache, queueOptions...)
+
+			mockWatcher := mockWorkloadUpdateWatcher(qManager)
+
+			reconciler := NewWorkloadReconciler(cl, qManager, cqCache, recorder)
+			reconciler.watchers = []WorkloadUpdateWatcher{mockWatcher}
+
+			ctxWithLogger, log := utiltesting.ContextWithLog(t)
+			ctx, ctxCancel := context.WithCancel(ctxWithLogger)
+			defer ctxCancel()
+
+			for _, cq := range clusterQueues {
+				cqCopy := cq.DeepCopy()
+				if err := stderrors.Join(cqCache.AddClusterQueue(ctx, cqCopy), qManager.AddClusterQueue(ctx, cqCopy)); err != nil {
+					t.Errorf("couldn't add the cluster queue: %v", err)
+				}
+			}
+			for _, lq := range localQueues {
+				lqCopy := lq.DeepCopy()
+				if err := stderrors.Join(cqCache.AddLocalQueue(lqCopy), qManager.AddLocalQueue(ctx, lqCopy)); err != nil {
+					t.Errorf("couldn't add the local queue: %v", err)
+				}
+			}
+
+			addToQueueCache := []*kueue.Workload{noiseWlPending}
+			if tc.wlInQueueCache != nil {
+				addToQueueCache = append(addToQueueCache, tc.wlInQueueCache)
+			}
+			for _, wl := range addToQueueCache {
+				if err := qManager.AddOrUpdateWorkload(log, wl.DeepCopy()); err != nil {
+					t.Errorf("couldn't add workload to queue cache: %v", err)
+				}
+			}
+
+			addToSchedCache := []*kueue.Workload{noiseWlAdmitted}
+			if tc.wlInSchedCache != nil {
+				addToSchedCache = append(addToSchedCache, tc.wlInSchedCache)
+			}
+			for _, wl := range addToSchedCache {
+				if !cqCache.AddOrUpdateWorkload(log, wl.DeepCopy()) {
+					t.Errorf("couldn't add workload to scheduler cache: %v", wl)
+				}
+			}
+
+			reconciler.deleteWorkloadFromCaches(ctx, wlNs, wlName)
+
+			if testError := stderrors.Join(mockWatcher.testErrors...); testError != nil {
+				t.Error(testError)
+			}
+
+			if diff := cmp.Diff(tc.wantNotifications, mockWatcher.notificationsRecorded); diff != "" {
+				t.Errorf("Incorrect notifications recorded (-want,+got):\n%s", diff)
+			}
+
+			wlRef := workload.NewReference(wlNs, wlName)
+			if qManager.GetWorkloadFromCache(wlRef) != nil {
+				t.Error("Workload still present in the queue cache")
+			}
+			if cqCache.GetWorkloadFromCache(wlRef) != nil {
+				t.Error("Workload still present in the scheduler cache")
+			}
+		})
 	}
 }

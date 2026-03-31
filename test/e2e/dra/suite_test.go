@@ -65,6 +65,11 @@ var _ = ginkgo.BeforeSuite(func() {
 	)
 })
 
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+})
+
 func waitForDRAExampleDriverAvailability(ctx context.Context, k8sClient client.Client) {
 	dsKey := types.NamespacedName{Namespace: "dra-example-driver", Name: "dra-example-driver-kubeletplugin"}
 	daemonset := &appsv1.DaemonSet{}
@@ -74,6 +79,6 @@ func waitForDRAExampleDriverAvailability(ctx context.Context, k8sClient client.C
 		g.Expect(k8sClient.Get(ctx, dsKey, daemonset)).To(gomega.Succeed())
 		g.Expect(daemonset.Status.DesiredNumberScheduled).To(gomega.BeNumerically(">", 0))
 		g.Expect(daemonset.Status.DesiredNumberScheduled).To(gomega.Equal(daemonset.Status.NumberAvailable))
-	}, util.StartUpTimeout, util.Interval).Should(gomega.Succeed())
+	}, util.VeryLongTimeout, util.Interval).Should(gomega.Succeed())
 	ginkgo.GinkgoLogr.Info("DaemonSet is available in the cluster", "daemonset", dsKey, "waitingTime", time.Since(waitForAvailableStart))
 }

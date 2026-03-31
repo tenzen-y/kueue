@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	workloadjob "sigs.k8s.io/kueue/pkg/controller/jobs/job"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
 	"sigs.k8s.io/kueue/test/util"
@@ -112,7 +113,13 @@ var _ = ginkgo.Describe("Kueue secure visibility server", func() {
 			})
 
 			ginkgo.By("Delete the first job to release the quota", func() {
-				gomega.Expect(util.DeleteAllPodsInNamespace(ctx, k8sClient, ns)).Should(gomega.Succeed())
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, firstJob, true)
+				firstWl := &kueue.Workload{ObjectMeta: metav1.ObjectMeta{
+					Namespace: firstJob.Namespace,
+					Name:      workloadjob.GetWorkloadNameForJob(firstJob.Name, firstJob.UID),
+				}}
+				// TODO(#1789): this is no longer needed when we fix the --orphan mode for Jobs
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, firstWl, true)
 			})
 
 			ginkgo.By("verify second job is not suspended", func() {
@@ -128,7 +135,7 @@ var _ = ginkgo.Describe("Kueue secure visibility server", func() {
 					info, err := visibilityClient.ClusterQueues().GetPendingWorkloadsSummary(ctx, clusterQueue.Name, metav1.GetOptions{})
 					g.Expect(err).NotTo(gomega.HaveOccurred())
 					g.Expect(info.Items).Should(gomega.BeEmpty())
-				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+				}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
 			})
 		})
 	})

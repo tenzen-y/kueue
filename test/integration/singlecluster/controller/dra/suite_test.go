@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/dra"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -63,6 +64,7 @@ var _ = ginkgo.BeforeSuite(func() {
 		WebhookPath: util.WebhookPath,
 		APIServerFeatureGates: []string{
 			"DynamicResourceAllocation=true",
+			"DRAExtendedResource=true",
 		},
 		APIServerRuntimeConfig: []string{
 			"resource.k8s.io/v1beta2=true",
@@ -77,6 +79,11 @@ var _ = ginkgo.BeforeSuite(func() {
 var _ = ginkgo.AfterSuite(func() {
 	ginkgo.By("tearing down the test environment")
 	fwk.Teardown()
+})
+
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 })
 
 // Manager setup used by tests to start controllers with DRA ConfigMap configuration
@@ -122,10 +129,12 @@ func managerSetup(modifyConfig func(*config.Configuration)) framework.ManagerSet
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		cCache := schdcache.New(mgr.GetClient())
-		queues := qcache.NewManager(mgr.GetClient(), cCache)
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 		// Core controllers
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, nil)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		// Scheduler - required for workload admission
@@ -134,6 +143,7 @@ func managerSetup(modifyConfig func(*config.Configuration)) framework.ManagerSet
 			cCache,
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("kueue-admission"),
+			scheduler.WithPreemptionExpectations(preemptionExpectations),
 		)
 		err = mgr.Add(sched)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

@@ -17,18 +17,30 @@ limitations under the License.
 package core
 
 import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/component-base/metrics/testutil"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/metrics"
+	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	testingmetrics "sigs.k8s.io/kueue/pkg/util/testing/metrics"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -1034,5 +1046,177 @@ var _ = ginkgo.Describe("ClusterQueue controller", ginkgo.Label("controller:clus
 			ginkgo.By("Delete clusterQueue")
 			util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
 		})
+
+		ginkgo.It("Should remove finalizer promptly when workload finishes", func() {
+			util.SetAdmissionCheckActive(ctx, k8sClient, check, metav1.ConditionTrue)
+			util.ExpectClusterQueueStatusMetric(cq, metrics.CQStatusActive)
+
+			ginkgo.By("Creating and admitting workload")
+			wl := utiltestingapi.MakeWorkload("workload", ns.Name).Queue(kueue.LocalQueueName(lq.Name)).Obj()
+			util.MustCreate(ctx, k8sClient, wl)
+			key := client.ObjectKeyFromObject(wl)
+			util.SetQuotaReservation(ctx, k8sClient, key, utiltestingapi.MakeAdmission(cq.Name).Obj())
+			util.SetWorkloadsAdmissionCheck(ctx, k8sClient, wl, kueue.AdmissionCheckReference(check.Name), kueue.CheckStateReady, true)
+			gomega.Eventually(func(g gomega.Gomega) {
+				updatedWl := &kueue.Workload{}
+				g.Expect(k8sClient.Get(ctx, key, updatedWl)).To(gomega.Succeed())
+				g.Expect(updatedWl.Status.Conditions).To(utiltesting.HaveConditionStatusTrue(kueue.WorkloadAdmitted))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+			ginkgo.By("Finishing workload")
+			util.FinishWorkloads(ctx, k8sClient, wl)
+
+			ginkgo.By("Deleting clusterQueue - should succeed without waiting")
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
+		})
+	})
+
+	ginkgo.When("ClusterQueue is concurrently modified", func() {
+		var (
+			cq *kueue.ClusterQueue
+		)
+
+		ginkgo.BeforeEach(func() {
+			cq = utiltestingapi.MakeClusterQueue("foo-cq").Obj()
+			util.MustCreate(ctx, k8sClient, cq)
+		})
+
+		ginkgo.AfterEach(func() {
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
+		})
+
+		ginkgo.It("Should log concurrent modification errors with log level smaller than error", func() {
+			_ = fwk.ObservedLogs.TakeAll() // clear logs
+
+			const nGoroutines = 25
+
+			// Using a WaitGroup ensures we don't leak goroutines into the next It() block.
+			var wg sync.WaitGroup
+			defer wg.Wait() // Wait for goroutines stopped.
+
+			ctx, cancel := context.WithTimeout(ginkgo.GinkgoTB().Context(), util.MediumTimeout)
+			defer cancel() // Stop goroutines.
+
+			setClusterStatusPending := func() {
+				defer ginkgo.GinkgoRecover()
+
+				for {
+					var updatedCq kueue.ClusterQueue
+					err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cq), &updatedCq)
+					if errors.Is(err, context.Canceled) {
+						return // Test is over, exit quietly
+					}
+					gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+					apimeta.SetStatusCondition(&updatedCq.Status.Conditions, metav1.Condition{
+						Type:    kueue.ClusterQueueActive,
+						Status:  metav1.ConditionFalse,
+						Reason:  "ByTest",
+						Message: "by test",
+					})
+					err = k8sClient.Status().Update(ctx, &updatedCq)
+					if errors.Is(err, context.Canceled) {
+						return // Test is over, exit quietly
+					}
+					gomega.Expect(util.IgnoreConflict(err)).To(gomega.Succeed())
+
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(util.Interval):
+						// Just continue to the next loop iteration.
+					}
+				}
+			}
+
+			for range nGoroutines {
+				wg.Go(setClusterStatusPending)
+			}
+
+			gomega.Eventually(func(g gomega.Gomega) {
+				reconcileLogs := fwk.ObservedLogs
+				reconcileConcurrentModificationLogs := reconcileLogs.Filter(util.IsLoggedEntryAConcurrentModification)
+				g.Expect(reconcileConcurrentModificationLogs.All()).ShouldNot(gomega.BeEmpty(),
+					"There should be some concurrent modifcation error log entries")
+				g.Expect(reconcileConcurrentModificationLogs.Filter(func(le observer.LoggedEntry) bool {
+					return le.Level >= zapcore.ErrorLevel
+				}).All()).Should(gomega.BeEmpty(),
+					"Log level should be smaller than error")
+			}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
+		})
+	})
+})
+
+var _ = ginkgo.Describe("ClusterQueue controller with RoleTracker", ginkgo.Label("controller:clusterqueue", "area:core"), ginkgo.Ordered, ginkgo.Serial, func() {
+	var (
+		electedChan   chan struct{}
+		trackerCancel context.CancelFunc
+		rf            *kueue.ResourceFlavor
+		cq            *kueue.ClusterQueue
+	)
+
+	ginkgo.BeforeEach(func() {
+		electedChan = make(chan struct{})
+		tracker := roletracker.NewRoleTracker(electedChan)
+		var trackerCtx context.Context
+		trackerCtx, trackerCancel = context.WithCancel(ctx)
+		go tracker.Start(trackerCtx, ctrl.Log)
+		fwk.StartManager(ctx, cfg, managerAndControllerSetup(nil, withRoleTracker(tracker)))
+
+		rf = utiltestingapi.MakeResourceFlavor("ha-transition-flavor").Obj()
+		util.MustCreate(ctx, k8sClient, rf)
+
+		cq = utiltestingapi.MakeClusterQueue("ha-transition-cq").
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("ha-transition-flavor").Resource(corev1.ResourceCPU, "10").Obj()).
+			Obj()
+		util.CreateClusterQueuesAndWaitForActive(ctx, k8sClient, cq)
+	})
+
+	ginkgo.AfterEach(func() {
+		util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
+		util.ExpectObjectToBeDeleted(ctx, k8sClient, rf, true)
+		select {
+		case <-electedChan:
+		default:
+			close(electedChan)
+		}
+		trackerCancel()
+		fwk.StopManager(ctx)
+	})
+
+	ginkgo.It("Should resync metrics after role transition from follower to leader", func() {
+		followerLabels := map[string]string{
+			"cluster_queue": cq.Name,
+			"replica_role":  roletracker.RoleFollower,
+		}
+
+		ginkgo.By("Verifying metrics exist with replica_role=follower")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(testingmetrics.CollectFilteredGaugeVec(metrics.ClusterQueueResourceNominalQuota, followerLabels)).NotTo(gomega.BeEmpty())
+			g.Expect(testingmetrics.CollectFilteredGaugeVec(metrics.ClusterQueueByStatus, followerLabels)).NotTo(gomega.BeEmpty())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Triggering role transition by closing electedChan")
+		close(electedChan)
+
+		ginkgo.By("Verifying metrics with replica_role=leader have correct values")
+		gomega.Eventually(func(g gomega.Gomega) {
+			nominalQuota, err := testutil.GetGaugeMetricValue(metrics.ClusterQueueResourceNominalQuota.WithLabelValues(
+				"", cq.Name, "ha-transition-flavor", string(corev1.ResourceCPU), roletracker.RoleLeader,
+			))
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(nominalQuota).To(gomega.Equal(float64(10)))
+
+			activeStatus, err := testutil.GetGaugeMetricValue(metrics.ClusterQueueByStatus.WithLabelValues(
+				cq.Name, string(metrics.CQStatusActive), roletracker.RoleLeader,
+			))
+			g.Expect(err).ToNot(gomega.HaveOccurred())
+			g.Expect(activeStatus).To(gomega.Equal(float64(1)))
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("Verifying metrics with replica_role=follower are gone")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(testingmetrics.CollectFilteredGaugeVec(metrics.ClusterQueueResourceNominalQuota, followerLabels)).To(gomega.BeEmpty())
+			g.Expect(testingmetrics.CollectFilteredGaugeVec(metrics.ClusterQueueByStatus, followerLabels)).To(gomega.BeEmpty())
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
 	})
 })

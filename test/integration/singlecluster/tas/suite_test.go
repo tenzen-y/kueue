@@ -34,9 +34,12 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/admissionchecks/provisioning"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
+	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	"sigs.k8s.io/kueue/pkg/controller/jobs/pod"
 	"sigs.k8s.io/kueue/pkg/controller/tas"
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/scheduler"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	"sigs.k8s.io/kueue/pkg/util/webhook"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
@@ -75,45 +78,61 @@ var _ = ginkgo.AfterSuite(func() {
 	fwk.Teardown()
 })
 
-func managerSetup(ctx context.Context, mgr manager.Manager) {
-	err := indexer.Setup(ctx, mgr.GetFieldIndexer())
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+})
 
-	failedWebhook, err := webhooks.Setup(mgr, nil)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
+func managerSetup(resourceTransformations ...config.ResourceTransformation) func(ctx context.Context, mgr manager.Manager) {
+	return func(ctx context.Context, mgr manager.Manager) {
+		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	err = webhook.SetupNoopWebhook(mgr, &corev1.Pod{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		failedWebhook, err := webhooks.Setup(mgr, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
 
-	controllersCfg := &config.Configuration{}
-	mgr.GetScheme().Default(controllersCfg)
+		err = webhook.SetupNoopWebhook(mgr, &corev1.Pod{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	cacheOptions := []schdcache.Option{}
-	cCache := schdcache.New(mgr.GetClient(), cacheOptions...)
-	queues := qcache.NewManager(mgr.GetClient(), cCache)
-	qManager = queues
+		controllersCfg := &config.Configuration{}
+		mgr.GetScheme().Default(controllersCfg)
 
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, nil)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "Core controller", failedCtrl)
+		cacheOptions := []schdcache.Option{
+			schdcache.WithResourceTransformations(resourceTransformations),
+		}
+		cCache := schdcache.New(mgr.GetClient(), cacheOptions...)
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions := []qcache.Option{
+			qcache.WithResourceTransformations(resourceTransformations),
+			qcache.WithPreemptionExpectations(preemptionExpectations),
+		}
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
+		qManager = queues
 
-	failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, controllersCfg, nil)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, nil, preemptionExpectations, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "Core controller", failedCtrl)
 
-	err = tasindexer.SetupIndexes(ctx, mgr.GetFieldIndexer())
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, controllersCfg, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
 
-	err = provisioning.SetupIndexer(ctx, mgr.GetFieldIndexer())
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = pod.SetupWebhook(mgr, jobframework.WithQueues(queues))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = tasindexer.SetupIndexes(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	reconciler, err := provisioning.NewController(
-		mgr.GetClient(),
-		mgr.GetEventRecorderFor("kueue-provisioning-request-controller"), nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = provisioning.SetupIndexer(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	err = reconciler.SetupWithManager(mgr)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		reconciler, err := provisioning.NewController(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor("kueue-provisioning-request-controller"), nil)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName))
-	err = sched.Start(ctx)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = reconciler.SetupWithManager(mgr)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
+		err = sched.Start(ctx)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
 }

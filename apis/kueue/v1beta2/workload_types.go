@@ -75,6 +75,15 @@ type WorkloadSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaximumExecutionTimeSeconds *int32 `json:"maximumExecutionTimeSeconds,omitempty"`
+
+	// preemptionGates is a list of gates governing whether the workload
+	// can trigger preemptions.
+	// The gates are closed by default.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	PreemptionGates []PreemptionGate `json:"preemptionGates,omitempty"`
 }
 
 // PriorityClassGroup indicates the API group of the PriorityClass object.
@@ -223,6 +232,36 @@ type PodSetTopologyRequest struct {
 	//
 	// +optional
 	PodSetSliceSize *int32 `json:"podSetSliceSize,omitempty"`
+
+	// podsetSliceRequiredTopologyConstraints defines all layers of slice
+	// topology constraints. Each entry specifies a topology level and slice
+	// size, from the outermost (coarsest) to the innermost (finest) layer.
+	// At most 3 layers are supported.
+	// This field is mutually exclusive with podSetSliceRequiredTopology and
+	// podSetSliceSize.
+	//
+	// This annotation is alpha-level for the TASMultiLayerTopology feature gate.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=3
+	PodsetSliceRequiredTopologyConstraints []PodsetSliceRequiredTopologyConstraint `json:"podsetSliceRequiredTopologyConstraints,omitempty"`
+}
+
+// PodsetSliceRequiredTopologyConstraint defines a single slice topology constraint layer.
+type PodsetSliceRequiredTopologyConstraint struct {
+	// topology indicates the topology level required for this slice layer.
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Topology string `json:"topology,omitempty"`
+
+	// size indicates the number of pods in each group at this slice layer.
+	//
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	Size int32 `json:"size,omitempty"`
 }
 
 type Admission struct {
@@ -562,6 +601,14 @@ type PodSet struct {
 	TopologyRequest *PodSetTopologyRequest `json:"topologyRequest,omitempty"`
 }
 
+type PreemptionGate struct {
+	// name identifies the preemption gate.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +required
+	Name string `json:"name"`
+}
+
 // WorkloadStatus defines the observed state of Workload
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.clusterName) || !has(self.clusterName) || oldSelf.clusterName == self.clusterName", message="clusterName is immutable once set"
 // +kubebuilder:validation:XValidation:rule="!has(self.clusterName) || (!has(self.nominatedClusterNames) || (has(self.nominatedClusterNames) && size(self.nominatedClusterNames) == 0))", message="clusterName and nominatedClusterNames are mutually exclusive"
@@ -668,6 +715,14 @@ type WorkloadStatus struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
 	UnhealthyNodes []UnhealthyNode `json:"unhealthyNodes,omitempty"`
+
+	// preemptionGates is a list of states of gates governing whether the workload
+	// can trigger preemptions.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	PreemptionGates []PreemptionGateState `json:"preemptionGates,omitempty"`
 }
 
 type SchedulingStats struct {
@@ -841,10 +896,44 @@ type PodSetRequest struct {
 	Resources corev1.ResourceList `json:"resources,omitempty"`
 }
 
+type PreemptionGatePosition string
+
+const (
+	// PreemptionGatePositionClosed means that the gate is blocking the workload from preempting.
+	PreemptionGatePositionClosed PreemptionGatePosition = "Closed"
+
+	// PreemptionGatePositionOpen means that the gate is not blocking the workload from preempting.
+	PreemptionGatePositionOpen PreemptionGatePosition = "Open"
+)
+
+type PreemptionGateState struct {
+	// name identifies the preemption gate.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +required
+	Name string `json:"name"`
+
+	// position of the preemption gate. One of
+	// +kubebuilder:validation:Enum=Closed;Open
+	// +required
+	Position PreemptionGatePosition `json:"position,omitempty"`
+
+	// lastTransitionTime is the last time the gate transitioned from one status to another.
+	// +required
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Format=date-time
+	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty,omitzero"`
+}
+
 const (
 	// WorkloadAdmitted means that the Workload has reserved quota and all the admissionChecks
 	// defined in the ClusterQueue are satisfied.
 	WorkloadAdmitted = "Admitted"
+
+	// WorkloadBlockedOnPreemptionGates means that the Workload attempted to reserve quota via a preemption, but was blocked.
+	// The possible reasons for this condition are:
+	// - "PreemptionGated": the preemptor workload could not preempt the preemption targets to acquire quota due to a preemption gate.
+	WorkloadBlockedOnPreemptionGates = "BlockedOnPreemptionGates"
 
 	// WorkloadQuotaReserved means that the Workload has reserved quota a ClusterQueue.
 	WorkloadQuotaReserved = "QuotaReserved"
@@ -883,6 +972,13 @@ const (
 	WorkloadDeactivationTarget = "DeactivationTarget"
 )
 
+// Reasons for the WorkloadPreemptionBlocked condition.
+const (
+	// PreemptionGated indicates the Workload could free up quota via
+	// preemption, but was prevented from doing so by a preemption gate.
+	PreemptionGated string = "PreemptionGated"
+)
+
 // Reasons for the WorkloadPreempted condition.
 const (
 	// InClusterQueueReason indicates the Workload was preempted due to
@@ -906,6 +1002,10 @@ const (
 	// WorkloadInadmissible means that the Workload can't reserve quota
 	// due to LocalQueue or ClusterQueue doesn't exist or inactive.
 	WorkloadInadmissible = "Inadmissible"
+
+	// WorkloadAdmissionGated indicates that the workload is inadmissible
+	// due to an AdmissionGatedBy annotation.
+	WorkloadAdmissionGated = "AdmissionGated"
 
 	// WorkloadEvictedByPreemption indicates that the workload was evicted
 	// in order to free resources for a workload with a higher priority.

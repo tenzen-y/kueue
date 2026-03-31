@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	kftrainerapi "github.com/kubeflow/trainer/v2/pkg/apis/trainer/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -76,6 +77,11 @@ func (b *multiKueueAdapter) SyncJob(ctx context.Context, localClient client.Clie
 	// clear the managedBy enables the TrainJob controller to take over
 	remoteJob.Spec.ManagedBy = nil
 
+	// Remove the Kueue runtime patch so the remote webhook can add its own.
+	remoteJob.Spec.RuntimePatches = slices.DeleteFunc(remoteJob.Spec.RuntimePatches, func(p kftrainerapi.RuntimePatch) bool {
+		return p.Manager == runtimePatchManagerName
+	})
+
 	return remoteClient.Create(ctx, &remoteJob)
 }
 
@@ -109,16 +115,16 @@ func (*multiKueueAdapter) GetEmptyList() client.ObjectList {
 	return &kftrainerapi.TrainJobList{}
 }
 
-func (*multiKueueAdapter) WorkloadKeyFor(o runtime.Object) (types.NamespacedName, error) {
+func (*multiKueueAdapter) WorkloadKeysFor(o runtime.Object) ([]types.NamespacedName, error) {
 	trainJob, isTrainJob := o.(*kftrainerapi.TrainJob)
 	if !isTrainJob {
-		return types.NamespacedName{}, errors.New("not a trainjob")
+		return nil, errors.New("not a trainjob")
 	}
 
 	prebuiltWl, hasPrebuiltWorkload := trainJob.Labels[constants.PrebuiltWorkloadLabel]
 	if !hasPrebuiltWorkload {
-		return types.NamespacedName{}, fmt.Errorf("no prebuilt workload found for trainjog: %s", klog.KObj(trainJob))
+		return nil, fmt.Errorf("no prebuilt workload found for trainjob: %s", klog.KObj(trainJob))
 	}
 
-	return types.NamespacedName{Name: prebuiltWl, Namespace: trainJob.Namespace}, nil
+	return []types.NamespacedName{{Name: prebuiltWl, Namespace: trainJob.Namespace}}, nil
 }

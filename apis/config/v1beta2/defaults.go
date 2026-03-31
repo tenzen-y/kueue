@@ -50,6 +50,7 @@ const (
 	DefaultRequeuingBackoffBaseSeconds            = 60
 	DefaultRequeuingBackoffMaxSeconds             = 3600
 	DefaultResourceTransformationStrategy         = Retain
+	DefaultVisibilityBindPort                     = 8082
 )
 
 func getOperatorNamespace() string {
@@ -72,6 +73,8 @@ func SetDefaults_Configuration(cfg *Configuration) {
 	cfg.Health.HealthProbeBindAddress = cmp.Or(cfg.Health.HealthProbeBindAddress, DefaultHealthProbeBindAddress)
 	cfg.LeaderElection = cmp.Or(cfg.LeaderElection, &configv1alpha1.LeaderElectionConfiguration{})
 	cfg.LeaderElection.ResourceName = cmp.Or(cfg.LeaderElection.ResourceName, DefaultLeaderElectionID)
+
+	cfg.Metrics.LocalQueueMetrics = cmp.Or(cfg.Metrics.LocalQueueMetrics, &LocalQueueMetrics{Enable: true})
 
 	// Default to Lease as component-base still defaults to endpoint resources
 	// until core components migrate to using Leases. See k/k #80289 for more details.
@@ -124,6 +127,8 @@ func SetDefaults_Configuration(cfg *Configuration) {
 	if afs := cfg.AdmissionFairSharing; afs != nil {
 		afs.UsageSamplingInterval.Duration = cmp.Or(afs.UsageSamplingInterval.Duration, 5*time.Minute)
 	}
+	cfg.VisibilityServer = cmp.Or(cfg.VisibilityServer, &VisibilityServerConfiguration{})
+	cfg.VisibilityServer.BindPort = cmp.Or(cfg.VisibilityServer.BindPort, ptr.To[int32](DefaultVisibilityBindPort))
 
 	if cfg.Resources != nil {
 		for idx := range cfg.Resources.Transformations {

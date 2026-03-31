@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,12 +42,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	controllerconstants "sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
-	podcontroller "sigs.k8s.io/kueue/pkg/controller/jobs/pod/constants"
+	podcontroller "sigs.k8s.io/kueue/pkg/controller/jobs/pod"
+	podconstants "sigs.k8s.io/kueue/pkg/controller/jobs/pod/constants"
+	"sigs.k8s.io/kueue/pkg/features"
 	clientutil "sigs.k8s.io/kueue/pkg/util/client"
 	"sigs.k8s.io/kueue/pkg/util/parallelize"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
+	"sigs.k8s.io/kueue/pkg/workload"
 )
 
 const (
@@ -61,6 +66,7 @@ var (
 
 type Reconciler struct {
 	client                       client.Client
+	record                       record.EventRecorder
 	logName                      string
 	manageJobsWithoutQueueName   bool
 	managedJobsNamespaceSelector labels.Selector
@@ -73,21 +79,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	log := ctrl.LoggerFrom(ctx)
 	log.V(2).Info("Reconcile StatefulSet")
 
+	sts := &appsv1.StatefulSet{}
+	if err := r.client.Get(ctx, req.NamespacedName, sts); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	wlName, err := findWorkloadName(ctx, r.client, sts)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	podList := &corev1.PodList{}
 	if err := r.client.List(ctx, podList, client.InNamespace(req.Namespace), client.MatchingLabels{
-		podcontroller.GroupNameLabel: GetWorkloadName(req.Name),
+		podconstants.GroupNameLabel: wlName,
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	sts := &appsv1.StatefulSet{}
-	err := r.client.Get(ctx, req.NamespacedName, sts)
-	if client.IgnoreNotFound(err) != nil {
+	if err := r.syncQueueLabel(ctx, sts, podList.Items); err != nil {
 		return ctrl.Result{}, err
-	}
-
-	if err != nil {
-		sts = nil
 	}
 
 	eg, ctx := errgroup.WithContext(ctx)
@@ -100,8 +110,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return r.reconcileWorkload(ctx, sts)
 	})
 
-	err = eg.Wait()
-	return ctrl.Result{}, err
+	return ctrl.Result{}, eg.Wait()
 }
 
 func (r *Reconciler) finalizePods(ctx context.Context, sts *appsv1.StatefulSet, pods []corev1.Pod) error {
@@ -117,7 +126,7 @@ func (r *Reconciler) finalizePod(ctx context.Context, sts *appsv1.StatefulSet, p
 			log.V(3).Info(
 				"Finalizing pod in group",
 				"pod", klog.KObj(pod),
-				"group", pod.Labels[podcontroller.GroupNameLabel],
+				"group", pod.Labels[podconstants.GroupNameLabel],
 			)
 			return true, nil
 		}
@@ -128,13 +137,13 @@ func (r *Reconciler) finalizePod(ctx context.Context, sts *appsv1.StatefulSet, p
 func ungateAndFinalize(sts *appsv1.StatefulSet, pod *corev1.Pod) bool {
 	var updated bool
 
-	if shouldUngate(sts, pod) && utilpod.Ungate(pod, podcontroller.SchedulingGateName) {
+	if shouldUngate(sts, pod) && utilpod.Ungate(pod, podconstants.SchedulingGateName) {
 		updated = true
 	}
 
 	// TODO (#8571): As discussed in https://github.com/kubernetes-sigs/kueue/issues/8571,
 	// this check should be removed in v0.20.
-	if shouldFinalize(sts, pod) && controllerutil.RemoveFinalizer(pod, podcontroller.PodFinalizer) {
+	if shouldFinalize(sts, pod) && controllerutil.RemoveFinalizer(pod, podconstants.PodFinalizer) {
 		updated = true
 	}
 
@@ -150,15 +159,73 @@ func shouldFinalize(sts *appsv1.StatefulSet, pod *corev1.Pod) bool {
 	return shouldUngate(sts, pod) || utilpod.IsTerminated(pod) || pod.DeletionTimestamp != nil
 }
 
+func (r *Reconciler) syncQueueLabel(ctx context.Context, sts *appsv1.StatefulSet, pods []corev1.Pod) error {
+	if sts == nil || ptr.Deref(sts.Spec.Replicas, 1) == 0 {
+		return nil
+	}
+	queueName := string(jobframework.QueueNameForObject(sts))
+	if queueName == "" {
+		return nil
+	}
+
+	return parallelize.Until(ctx, len(pods), func(i int) error {
+		pod := &pods[i]
+		if pod.Labels[controllerconstants.QueueLabel] == queueName {
+			return nil
+		}
+		return client.IgnoreNotFound(clientutil.Patch(ctx, r.client, pod, func() (bool, error) {
+			pod.Labels[controllerconstants.QueueLabel] = queueName
+			return true, nil
+		}))
+	})
+}
+
+// findWorkloadName returns the workload name for the given StatefulSet,
+// falling back to the legacy name (without UID) if no workload exists under the new name.
+// TODO(#9497, v0.20): Remove legacy fallback.
+func findWorkloadName(ctx context.Context, c client.Client, sts *appsv1.StatefulSet) (string, error) {
+	wlName := GetWorkloadName(GetOwnerUID(sts), sts.Name)
+	wl := &kueue.Workload{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: sts.Namespace, Name: wlName}, wl)
+	if client.IgnoreNotFound(err) != nil {
+		return wlName, err
+	}
+	if apierrors.IsNotFound(err) {
+		legacyName := GetWorkloadName("", sts.Name)
+		if err := c.Get(ctx, client.ObjectKey{Namespace: sts.Namespace, Name: legacyName}, wl); err == nil {
+			ctrl.LoggerFrom(ctx).V(3).Info("Using legacy workload name", "legacyName", legacyName, "newName", wlName)
+			return legacyName, nil
+		} else if !apierrors.IsNotFound(err) {
+			return wlName, err
+		}
+	}
+	return wlName, nil
+}
+
 func (r *Reconciler) reconcileWorkload(ctx context.Context, sts *appsv1.StatefulSet) error {
 	if sts == nil {
 		return nil
 	}
 
+	replicas := ptr.Deref(sts.Spec.Replicas, 1)
+	queueName := jobframework.QueueNameForObject(sts)
+
 	wl := &kueue.Workload{}
-	err := r.client.Get(ctx, client.ObjectKey{Namespace: sts.Namespace, Name: GetWorkloadName(sts.Name)}, wl)
+	wlName, err := findWorkloadName(ctx, r.client, sts)
 	if err != nil {
-		return client.IgnoreNotFound(err)
+		return err
+	}
+	err = r.client.Get(ctx, client.ObjectKey{Namespace: sts.Namespace, Name: wlName}, wl)
+
+	if apierrors.IsNotFound(err) {
+		_, isMultiKueueRemote := sts.Labels[kueue.MultiKueueOriginLabel]
+		if replicas > 0 && (queueName != "" || r.manageJobsWithoutQueueName) && !isMultiKueueRemote {
+			return r.createPrebuiltWorkload(ctx, sts)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	hasOwnerReference, err := controllerutil.HasOwnerReference(wl.OwnerReferences, sts, r.client.Scheme())
@@ -166,10 +233,7 @@ func (r *Reconciler) reconcileWorkload(ctx context.Context, sts *appsv1.Stateful
 		return err
 	}
 
-	var (
-		shouldUpdate = false
-		replicas     = ptr.Deref(sts.Spec.Replicas, 1)
-	)
+	var shouldUpdate bool
 
 	switch {
 	case hasOwnerReference && replicas == 0:
@@ -178,13 +242,95 @@ func (r *Reconciler) reconcileWorkload(ctx context.Context, sts *appsv1.Stateful
 	case !hasOwnerReference && replicas > 0:
 		shouldUpdate = true
 		err = controllerutil.SetOwnerReference(sts, wl, r.client.Scheme())
+		if wl.Annotations == nil {
+			wl.Annotations = make(map[string]string, 2)
+		}
+		wl.Annotations[controllerconstants.JobOwnerGVKAnnotation] = gvk.String()
+		wl.Annotations[controllerconstants.JobOwnerNameAnnotation] = sts.Name
 	}
-	if err != nil || !shouldUpdate {
+	if err != nil {
 		return err
 	}
 
-	err = r.client.Update(ctx, wl)
-	return err
+	if replicas > 0 && wl.Spec.QueueName != queueName {
+		wl.Spec.QueueName = queueName
+		shouldUpdate = true
+	}
+
+	if features.Enabled(features.AdmissionGatedBy) {
+		gateUpdated := jobframework.PropagateAdmissionGatedByAnnotation(sts, wl)
+		shouldUpdate = gateUpdated || shouldUpdate
+	}
+
+	if !shouldUpdate {
+		return nil
+	}
+
+	return r.client.Update(ctx, wl)
+}
+
+func (r *Reconciler) createPrebuiltWorkload(ctx context.Context, sts *appsv1.StatefulSet) error {
+	createdWorkload, err := r.constructWorkload(sts)
+	if err != nil {
+		return err
+	}
+
+	if err := jobframework.PrepareWorkloadPriority(ctx, r.client, sts, createdWorkload, nil); err != nil {
+		return err
+	}
+
+	if err := r.client.Create(ctx, createdWorkload); err != nil {
+		return client.IgnoreAlreadyExists(err)
+	}
+	r.record.Eventf(
+		sts, corev1.EventTypeNormal, jobframework.ReasonCreatedWorkload,
+		"Created Workload: %v", workload.Key(createdWorkload),
+	)
+	return nil
+}
+
+func (r *Reconciler) constructWorkload(sts *appsv1.StatefulSet) (*kueue.Workload, error) {
+	replicas := ptr.Deref(sts.Spec.Replicas, 1)
+	podSet := kueue.PodSet{
+		Name:  kueue.DefaultPodSetName,
+		Count: replicas,
+		Template: corev1.PodTemplateSpec{
+			Spec: *sts.Spec.Template.Spec.DeepCopy(),
+		},
+	}
+	jobframework.SanitizePodSet(&podSet)
+
+	if features.Enabled(features.TopologyAwareScheduling) {
+		topologyRequest, err := jobframework.NewPodSetTopologyRequest(sts.Spec.Template.ObjectMeta.DeepCopy()).
+			PodIndexLabel(ptr.To(appsv1.PodIndexLabel)).
+			Build()
+		if err != nil {
+			return nil, err
+		}
+		podSet.TopologyRequest = topologyRequest
+	}
+
+	wl := podcontroller.NewGroupWorkload(GetWorkloadName(GetOwnerUID(sts), sts.Name), sts, []kueue.PodSet{podSet}, nil)
+
+	if wl.Labels == nil {
+		wl.Labels = make(map[string]string, 1)
+	}
+	wl.Labels[controllerconstants.JobUIDLabel] = string(sts.UID)
+
+	if wl.Annotations == nil {
+		wl.Annotations = make(map[string]string)
+	}
+	wl.Annotations[controllerconstants.JobOwnerGVKAnnotation] = gvk.String()
+	wl.Annotations[controllerconstants.JobOwnerNameAnnotation] = sts.Name
+
+	if features.Enabled(features.AdmissionGatedBy) {
+		jobframework.PropagateAdmissionGatedByAnnotation(sts, wl)
+	}
+
+	if err := controllerutil.SetOwnerReference(sts, wl, r.client.Scheme()); err != nil {
+		return nil, err
+	}
+	return wl, nil
 }
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -199,11 +345,12 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func NewReconciler(_ context.Context, client client.Client, _ client.FieldIndexer, _ record.EventRecorder, opts ...jobframework.Option) (jobframework.JobReconcilerInterface, error) {
+func NewReconciler(_ context.Context, client client.Client, _ client.FieldIndexer, eventRecorder record.EventRecorder, opts ...jobframework.Option) (jobframework.JobReconcilerInterface, error) {
 	options := jobframework.ProcessOptions(opts...)
 
 	return &Reconciler{
 		client:                       client,
+		record:                       eventRecorder,
 		logName:                      "statefulset-reconciler",
 		manageJobsWithoutQueueName:   options.ManageJobsWithoutQueueName,
 		managedJobsNamespaceSelector: options.ManagedJobsNamespaceSelector,
@@ -239,9 +386,13 @@ func (r *Reconciler) handle(obj client.Object) bool {
 		return true
 	}
 
-	ctx := context.Background()
 	log := r.logger().WithValues("statefulset", klog.KObj(sts))
-	ctrl.LoggerInto(ctx, log)
+	ctx := ctrl.LoggerInto(context.Background(), log)
+
+	if frameworkName, managed := managedByAnotherFramework(sts); managed {
+		log.V(3).Info("Skipping reconciliation because the object is managed by another framework", "framework", frameworkName)
+		return false
+	}
 
 	// Handle only statefulset managed by kueue.
 	suspend, err := jobframework.WorkloadShouldBeSuspended(ctx, sts, r.client, r.manageJobsWithoutQueueName, r.managedJobsNamespaceSelector)
@@ -272,7 +423,7 @@ func (h *podHandler) Delete(context.Context, event.DeleteEvent, workqueue.TypedR
 
 func (h *podHandler) handle(obj client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	pod, isPod := obj.(*corev1.Pod)
-	if !isPod || pod.Annotations[podcontroller.SuspendedByParentAnnotation] != FrameworkName {
+	if !isPod || pod.Annotations[podconstants.SuspendedByParentAnnotation] != FrameworkName {
 		return
 	}
 	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {

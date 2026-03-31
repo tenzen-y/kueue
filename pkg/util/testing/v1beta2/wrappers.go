@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1beta1
+package v1beta2
 
 import (
 	"fmt"
@@ -214,11 +214,11 @@ func (w *WorkloadWrapper) FinishedAt(t time.Time) *WorkloadWrapper {
 	return w
 }
 
-func (w *WorkloadWrapper) Evicted() *WorkloadWrapper {
+func (w *WorkloadWrapper) EvictedAt(t time.Time) *WorkloadWrapper {
 	cond := metav1.Condition{
 		Type:               kueue.WorkloadEvicted,
 		Status:             metav1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
+		LastTransitionTime: metav1.NewTime(t),
 		Reason:             "ByTest",
 		Message:            "Evicted by test",
 	}
@@ -405,6 +405,16 @@ func (w *WorkloadWrapper) NominatedClusterNames(nominatedClusterNames ...string)
 	return w
 }
 
+func (w *WorkloadWrapper) PreemptionGates(preemptionGates ...kueue.PreemptionGate) *WorkloadWrapper {
+	w.Spec.PreemptionGates = preemptionGates
+	return w
+}
+
+func (w *WorkloadWrapper) PreemptionGateStates(preemptionGateStates ...kueue.PreemptionGateState) *WorkloadWrapper {
+	w.Status.PreemptionGates = preemptionGateStates
+	return w
+}
+
 func AppendOwnerReference(obj client.Object, gvk schema.GroupVersionKind, name, uid string, controller, blockDeletion *bool) {
 	obj.SetOwnerReferences(append(obj.GetOwnerReferences(), metav1.OwnerReference{
 		APIVersion:         gvk.GroupVersion().String(),
@@ -489,6 +499,14 @@ func (p *PodSetWrapper) SliceSizeTopologyRequest(size int32) *PodSetWrapper {
 		p.TopologyRequest = &kueue.PodSetTopologyRequest{}
 	}
 	p.TopologyRequest.PodSetSliceSize = &size
+	return p
+}
+
+func (p *PodSetWrapper) SliceRequiredTopologyConstraints(constraints ...kueue.PodsetSliceRequiredTopologyConstraint) *PodSetWrapper {
+	if p.TopologyRequest == nil {
+		p.TopologyRequest = &kueue.PodSetTopologyRequest{}
+	}
+	p.TopologyRequest.PodsetSliceRequiredTopologyConstraints = constraints
 	return p
 }
 
@@ -830,6 +848,22 @@ func (c *CohortWrapper) FairWeight(w resource.Quantity) *CohortWrapper {
 	return c
 }
 
+func (c *CohortWrapper) Label(k, v string) *CohortWrapper {
+	if c.Labels == nil {
+		c.Labels = make(map[string]string)
+	}
+	c.Labels[k] = v
+	return c
+}
+
+func (c *CohortWrapper) Annotation(k, v string) *CohortWrapper {
+	if c.Annotations == nil {
+		c.Annotations = make(map[string]string)
+	}
+	c.Annotations[k] = v
+	return c
+}
+
 // ClusterQueueWrapper wraps a ClusterQueue.
 type ClusterQueueWrapper struct{ kueue.ClusterQueue }
 
@@ -987,6 +1021,14 @@ func (c *ClusterQueueWrapper) Label(k, v string) *ClusterQueueWrapper {
 		c.Labels = make(map[string]string)
 	}
 	c.Labels[k] = v
+	return c
+}
+
+func (c *ClusterQueueWrapper) Annotation(k, v string) *ClusterQueueWrapper {
+	if c.Annotations == nil {
+		c.Annotations = make(map[string]string)
+	}
+	c.Annotations[k] = v
 	return c
 }
 
@@ -1180,6 +1222,15 @@ func (t *TopologyWrapper) Levels(levels ...string) *TopologyWrapper {
 			NodeLabel: level,
 		}
 	}
+	return t
+}
+
+// Label adds a label to a Topology.
+func (t *TopologyWrapper) Label(k, v string) *TopologyWrapper {
+	if t.Labels == nil {
+		t.Labels = make(map[string]string)
+	}
+	t.Labels[k] = v
 	return t
 }
 

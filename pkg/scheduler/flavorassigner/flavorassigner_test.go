@@ -191,20 +191,18 @@ func TestAssignFlavors(t *testing.T) {
 	}
 
 	cases := map[string]struct {
-		wlPods                              []kueue.PodSet
-		wlReclaimablePods                   []kueue.ReclaimablePod
-		clusterQueue                        kueue.ClusterQueue
-		clusterQueueUsage                   resources.FlavorResourceQuantities
-		secondaryClusterQueue               *kueue.ClusterQueue
-		secondaryClusterQueueUsage          resources.FlavorResourceQuantities
-		wantRepMode                         FlavorAssignmentMode
-		wantAssignment                      Assignment
-		disableLendingLimit                 bool
-		enableFairSharing                   bool
-		simulationResult                    map[resources.FlavorResource]simulationResultForFlavor
-		elasticJobsViaWorkloadSlicesEnabled bool
-		preemptWorkloadSlice                *workload.Info
-		featureGates                        map[featuregate.Feature]bool
+		wlPods                     []kueue.PodSet
+		wlReclaimablePods          []kueue.ReclaimablePod
+		clusterQueue               kueue.ClusterQueue
+		clusterQueueUsage          resources.FlavorResourceQuantities
+		secondaryClusterQueue      *kueue.ClusterQueue
+		secondaryClusterQueueUsage resources.FlavorResourceQuantities
+		wantRepMode                FlavorAssignmentMode
+		wantAssignment             Assignment
+		enableFairSharing          bool
+		simulationResult           map[resources.FlavorResource]simulationResultForFlavor
+		preemptWorkloadSlice       *workload.Info
+		featureGates               map[featuregate.Feature]bool
 	}{
 		"single flavor, fits": {
 			wlPods: []kueue.PodSet{
@@ -3172,7 +3170,7 @@ func TestAssignFlavors(t *testing.T) {
 			},
 		},
 		"workload slice preemption fits in the original workload resource flavor": {
-			elasticJobsViaWorkloadSlicesEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			wlPods: []kueue.PodSet{
 				*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
 					Request(corev1.ResourceCPU, "3").
@@ -3231,13 +3229,13 @@ func TestAssignFlavors(t *testing.T) {
 					Count: 1,
 				}},
 				Usage: workload.Usage{Quota: resources.FlavorResourceQuantities{
-					{Flavor: "two", Resource: corev1.ResourceCPU}:    3_000,
-					{Flavor: "two", Resource: corev1.ResourceMemory}: 10 * utiltesting.Mi,
+					{Flavor: "two", Resource: corev1.ResourceCPU}:    1_000,
+					{Flavor: "two", Resource: corev1.ResourceMemory}: 0,
 				}},
 			},
 		},
 		"workload slice preemption does not fit in the original workload resource flavor": {
-			elasticJobsViaWorkloadSlicesEnabled: true,
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
 			wlPods: []kueue.PodSet{
 				*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
 					Request(corev1.ResourceCPU, "3").
@@ -3304,9 +3302,6 @@ func TestAssignFlavors(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			ctx, log := utiltesting.ContextWithLog(t)
-			if tc.disableLendingLimit {
-				features.SetFeatureGateDuringTest(t, features.LendingLimit, false)
-			}
 			for fg, enabled := range tc.featureGates {
 				features.SetFeatureGateDuringTest(t, fg, enabled)
 			}
@@ -3355,10 +3350,6 @@ func TestAssignFlavors(t *testing.T) {
 					t.Fatalf("Failed to create secondary CQ snapshot")
 				}
 				secondaryClusterQueue.AddUsage(workload.Usage{Quota: tc.secondaryClusterQueueUsage})
-			}
-
-			if tc.elasticJobsViaWorkloadSlicesEnabled {
-				features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, true)
 			}
 
 			flvAssigner := New(wlInfo, clusterQueue, resourceFlavors, tc.enableFairSharing, &testOracle{simulationResult: tc.simulationResult}, tc.preemptWorkloadSlice)
@@ -3914,7 +3905,7 @@ func TestIsPreferred(t *testing.T) {
 				WhenCanPreempt: kueue.TryNextFlavor,
 				Preference:     makePref(kueue.BorrowingOverPreemption),
 			},
-			wantPreferred: true,
+			wantPreferred: false,
 		},
 		"explicit PreemptionOverBorrowing prioritises lower preemption": {
 			a: granularMode{preemptionMode: preempt, borrowingLevel: 1},
@@ -3924,7 +3915,7 @@ func TestIsPreferred(t *testing.T) {
 				WhenCanPreempt: kueue.TryNextFlavor,
 				Preference:     makePref(kueue.PreemptionOverBorrowing),
 			},
-			wantPreferred: false,
+			wantPreferred: true,
 		},
 		"explicit PreemptionOverBorrowing breaks borrowing ties with preemption": {
 			a: granularMode{preemptionMode: preempt, borrowingLevel: 1},
@@ -3980,7 +3971,7 @@ func TestWorkloadsTopologyRequests_ErrorBranches(t *testing.T) {
 			}),
 			wantErr: "workload requires Topology, but there is no TAS cache information",
 		},
-		"workload requires Topology, but there is no TAS cache information for the assigned flavor": {
+		"workload requires Topology, but there is no TAS flavor assigned": {
 			cq: schdcache.ClusterQueueSnapshot{
 				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{"tas": nil},
 			},
@@ -4004,7 +3995,38 @@ func TestWorkloadsTopologyRequests_ErrorBranches(t *testing.T) {
 					},
 				},
 			}),
-			wantErr: "workload requires Topology, but there is no TAS cache information for the assigned flavor",
+			wantErr: "no TAS flavor assigned",
+		},
+		"more than one TAS flavor assigned (onlyTASFlavor fails); RepresentativeMode must be NoFit": {
+			cq: schdcache.ClusterQueueSnapshot{
+				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{
+					"flavor-a": {},
+					"flavor-b": {},
+				},
+			},
+			assignment: Assignment{
+				PodSets: []PodSetAssignment{{
+					Name: kueue.DefaultPodSetName,
+					Flavors: ResourceAssignment{
+						corev1.ResourceCPU:    {Name: "flavor-a", Mode: Fit, TriedFlavorIdx: 0},
+						corev1.ResourceMemory: {Name: "flavor-b", Mode: Fit, TriedFlavorIdx: 0},
+					},
+					Count:  1,
+					Status: *NewStatus(),
+				}},
+			},
+			workload: *workload.NewInfo(&kueue.Workload{
+				Spec: kueue.WorkloadSpec{
+					PodSets: []kueue.PodSet{
+						*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).
+							Request(corev1.ResourceCPU, "1").
+							Request(corev1.ResourceMemory, "1Gi").
+							RequiredTopologyRequest(corev1.LabelHostname).
+							Obj(),
+					},
+				},
+			}),
+			wantErr: "more than one TAS flavor assigned: flavor-a, flavor-b",
 		},
 	}
 
@@ -4014,8 +4036,157 @@ func TestWorkloadsTopologyRequests_ErrorBranches(t *testing.T) {
 			if len(tasReqs) != 0 {
 				t.Errorf("expected no TAS requests, got: %+v", tasReqs)
 			}
-			if diff := cmp.Diff(tc.wantErr, tc.assignment.PodSets[0].Status.err.Error()); diff != "" {
-				t.Errorf("Error mismatch (-want +got):\n%s", diff)
+			errMsg := ""
+			if tc.assignment.PodSets[0].Status.err != nil {
+				errMsg = tc.assignment.PodSets[0].Status.err.Error()
+			}
+			if tc.wantErr != "" && errMsg != tc.wantErr {
+				t.Errorf("Error mismatch (-want +got):\n%s", cmp.Diff(tc.wantErr, errMsg))
+			}
+			// When TAS request build fails, the assignment should be unfit so the workload is not admitted.
+			if got := tc.assignment.RepresentativeMode(); got != NoFit {
+				t.Errorf("RepresentativeMode() = %v, want NoFit (workload must not be admitted when TAS request build fails)", got)
+			}
+		})
+	}
+}
+
+func TestWorkloadsTopologyRequests_ElasticJobsValidation(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, true)
+	features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlicesWithTAS, true)
+
+	// Create a mock TAS flavor snapshot
+	tasFlavor := &schdcache.TASFlavorSnapshot{}
+
+	cases := map[string]struct {
+		cq         schdcache.ClusterQueueSnapshot
+		assignment Assignment
+		workload   workload.Info
+		wantErr    string
+	}{
+		"required topology is rejected with ElasticJobsViaWorkloadSlices": {
+			cq: schdcache.ClusterQueueSnapshot{
+				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{"tas": tasFlavor},
+			},
+			assignment: Assignment{
+				PodSets: []PodSetAssignment{{
+					Name: kueue.DefaultPodSetName,
+					Flavors: ResourceAssignment{
+						corev1.ResourceCPU: {Name: "tas", Mode: Fit, TriedFlavorIdx: -1},
+					},
+					Count:  2,
+					Status: *NewStatus(),
+				}},
+				replaceWorkloadSlice: workload.NewInfo(&kueue.Workload{
+					Status: kueue.WorkloadStatus{
+						Admission: &kueue.Admission{
+							PodSetAssignments: []kueue.PodSetAssignment{{
+								Name:               kueue.DefaultPodSetName,
+								TopologyAssignment: &kueue.TopologyAssignment{},
+							}},
+						},
+					},
+				}),
+			},
+			workload: *workload.NewInfo(&kueue.Workload{
+				Spec: kueue.WorkloadSpec{
+					PodSets: []kueue.PodSet{
+						*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 2).
+							Request(corev1.ResourceCPU, "1").
+							RequiredTopologyRequest(corev1.LabelHostname).
+							Obj(),
+					},
+				},
+			}),
+			wantErr: "required topology is not supported with ElasticJobsViaWorkloadSlices",
+		},
+		"preferred topology is rejected with ElasticJobsViaWorkloadSlices": {
+			cq: schdcache.ClusterQueueSnapshot{
+				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{"tas": tasFlavor},
+			},
+			assignment: Assignment{
+				PodSets: []PodSetAssignment{{
+					Name: kueue.DefaultPodSetName,
+					Flavors: ResourceAssignment{
+						corev1.ResourceCPU: {Name: "tas", Mode: Fit, TriedFlavorIdx: -1},
+					},
+					Count:  2,
+					Status: *NewStatus(),
+				}},
+				replaceWorkloadSlice: workload.NewInfo(&kueue.Workload{
+					Status: kueue.WorkloadStatus{
+						Admission: &kueue.Admission{
+							PodSetAssignments: []kueue.PodSetAssignment{{
+								Name:               kueue.DefaultPodSetName,
+								TopologyAssignment: &kueue.TopologyAssignment{},
+							}},
+						},
+					},
+				}),
+			},
+			workload: *workload.NewInfo(&kueue.Workload{
+				Spec: kueue.WorkloadSpec{
+					PodSets: []kueue.PodSet{
+						*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 2).
+							Request(corev1.ResourceCPU, "1").
+							PreferredTopologyRequest(corev1.LabelHostname).
+							Obj(),
+					},
+				},
+			}),
+			wantErr: "preferred topology is not supported with ElasticJobsViaWorkloadSlices",
+		},
+		"unconstrained topology is accepted with ElasticJobsViaWorkloadSlices": {
+			cq: schdcache.ClusterQueueSnapshot{
+				TASFlavors: map[kueue.ResourceFlavorReference]*schdcache.TASFlavorSnapshot{"tas": tasFlavor},
+			},
+			assignment: Assignment{
+				PodSets: []PodSetAssignment{{
+					Name: kueue.DefaultPodSetName,
+					Flavors: ResourceAssignment{
+						corev1.ResourceCPU: {Name: "tas", Mode: Fit, TriedFlavorIdx: -1},
+					},
+					Count:  2,
+					Status: *NewStatus(),
+				}},
+				replaceWorkloadSlice: workload.NewInfo(&kueue.Workload{
+					Status: kueue.WorkloadStatus{
+						Admission: &kueue.Admission{
+							PodSetAssignments: []kueue.PodSetAssignment{{
+								Name:               kueue.DefaultPodSetName,
+								TopologyAssignment: &kueue.TopologyAssignment{},
+							}},
+						},
+					},
+				}),
+			},
+			workload: *workload.NewInfo(&kueue.Workload{
+				Spec: kueue.WorkloadSpec{
+					PodSets: []kueue.PodSet{
+						*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 2).
+							Request(corev1.ResourceCPU, "1").
+							UnconstrainedTopologyRequest().
+							Obj(),
+					},
+				},
+			}),
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tasReqs := tc.assignment.WorkloadsTopologyRequests(&tc.workload, &tc.cq)
+			if tc.wantErr != "" {
+				if len(tasReqs) != 0 {
+					t.Errorf("expected no TAS requests, got: %+v", tasReqs)
+				}
+				if tc.assignment.PodSets[0].Status.err == nil {
+					t.Errorf("expected error %q, got nil", tc.wantErr)
+				} else if diff := cmp.Diff(tc.wantErr, tc.assignment.PodSets[0].Status.err.Error()); diff != "" {
+					t.Errorf("Error mismatch (-want +got):\n%s", diff)
+				}
+			} else if tc.assignment.PodSets[0].Status.err != nil {
+				t.Errorf("expected no error, got: %v", tc.assignment.PodSets[0].Status.err)
 			}
 		})
 	}
@@ -4157,6 +4328,70 @@ func TestAssignment_TotalRequestsFor(t *testing.T) {
 				resources.FlavorResource{Flavor: "default", Resource: corev1.ResourceMemory}: 2 * 1048576,
 			},
 		},
+		"WorkloadWithMultiplePodSetsOneUnchangedReplacement": {
+			fields: fields{
+				PodSets: []PodSetAssignment{
+					{
+						Name: "worker",
+						Flavors: ResourceAssignment{
+							corev1.ResourceCPU:    {Name: "default", Mode: Fit, TriedFlavorIdx: -1},
+							corev1.ResourceMemory: {Name: "default", Mode: Fit, TriedFlavorIdx: -1},
+						},
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("1"),
+							corev1.ResourceMemory: resource.MustParse("1Mi"),
+						},
+						Count: 2, // Unchanged: was 2, still 2
+					},
+					{
+						Name: "coordinator",
+						Flavors: ResourceAssignment{
+							corev1.ResourceCPU:    {Name: "default", Mode: Fit, TriedFlavorIdx: -1},
+							corev1.ResourceMemory: {Name: "default", Mode: Fit, TriedFlavorIdx: -1},
+						},
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("2Mi"),
+						},
+						Count: 3, // Changed: was 1, now 3
+					},
+				},
+				replaceWorkloadSlice: workload.NewInfo(utiltestingapi.MakeWorkload("test", "default").
+					PodSets(
+						*utiltestingapi.MakePodSet("worker", 2).
+							Request(corev1.ResourceCPU, "1").
+							Request(corev1.ResourceMemory, "1Mi").
+							Obj(),
+						*utiltestingapi.MakePodSet("coordinator", 1).
+							Request(corev1.ResourceCPU, "2").
+							Request(corev1.ResourceMemory, "2Mi").
+							Obj(),
+					).
+					Obj()),
+			},
+			args: args{
+				wl: workload.NewInfo(utiltestingapi.MakeWorkload("test", "default").
+					PodSets(
+						*utiltestingapi.MakePodSet("worker", 2).
+							Request(corev1.ResourceCPU, "1").
+							Request(corev1.ResourceMemory, "1Mi").
+							Obj(),
+						*utiltestingapi.MakePodSet("coordinator", 3).
+							Request(corev1.ResourceCPU, "2").
+							Request(corev1.ResourceMemory, "2Mi").
+							Obj(),
+					).
+					Obj()),
+			},
+			want: resources.FlavorResourceQuantities{
+				// worker: (2 - 2) * 1 CPU = 0 (no additional quota needed)
+				// coordinator: (3 - 1) * 2 CPU = 4 (need 2 more pods worth of resources)
+				// Total CPU: 0 + 4000m = 4000m
+				// Total Memory: 0 + 4Mi = 4Mi
+				resources.FlavorResource{Flavor: "default", Resource: corev1.ResourceCPU}:    4 * 1000,
+				resources.FlavorResource{Flavor: "default", Resource: corev1.ResourceMemory}: 4 * 1048576,
+			},
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -4167,6 +4402,34 @@ func TestAssignment_TotalRequestsFor(t *testing.T) {
 			got := a.TotalRequestsFor(tt.args.wl)
 			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Errorf("TotalRequestsFor() (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestAssignment_RequiresBorrowing(t *testing.T) {
+	tests := map[string]struct {
+		borrowing int
+		want      bool
+	}{
+		"no borrowing": {
+			borrowing: 0,
+			want:      false,
+		},
+		"borrows at level 1": {
+			borrowing: 1,
+			want:      true,
+		},
+		"borrows at level 2": {
+			borrowing: 2,
+			want:      true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			a := &Assignment{Borrowing: tc.borrowing}
+			if got := a.RequiresBorrowing(); got != tc.want {
+				t.Errorf("RequiresBorrowing() = %v, want %v", got, tc.want)
 			}
 		})
 	}

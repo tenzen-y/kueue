@@ -73,21 +73,16 @@ kubectl config use-context kind-manager
 # Install Kueue
 if [ "$USE_MAIN_BRANCH" = "true" ]; then
     echo "[2/5] Installing Kueue from main branch..."
-    KUEUE_APPLY_FLAGS="-k github.com/kubernetes-sigs/kueue/config/default?ref=main"
+    KUEUE_APPLY_FLAGS=(-k "github.com/kubernetes-sigs/kueue/config/default?ref=main")
 else
     echo "[2/5] Installing Kueue ${KUEUE_VERSION}..."
-    KUEUE_APPLY_FLAGS="-f https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+    KUEUE_APPLY_FLAGS=(-f "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml")
 fi
 
 for cluster in manager ${WORKER_CLUSTERS}; do
-    # shellcheck disable=SC2086
-    kubectl --context "kind-${cluster}" apply --server-side ${KUEUE_APPLY_FLAGS}
+    kubectl --context "kind-${cluster}" apply --server-side "${KUEUE_APPLY_FLAGS[@]}"
     kubectl --context "kind-${cluster}" wait --for=condition=available --timeout=300s deployment/kueue-controller-manager -n kueue-system
 done
-
-# Configure manager for Kind clusters
-kubectl --context kind-manager patch deployment kueue-controller-manager -n kueue-system --type='json' \
-  -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--feature-gates=MultiKueueAllowInsecureKubeconfigs=true"}]'
 
 cat > /tmp/kueue-integrations-patch.yaml <<'EOF'
 data:
@@ -167,13 +162,16 @@ EOF
     # Extract token from secret
     TOKEN=$(kubectl --context "kind-${cluster}" get secret multikueue-sa-token -n kueue-system -o jsonpath='{.data.token}' | base64 --decode)
 
+    # Extract the Certificate Authority
+    CA_DATA=$(kubectl --context "kind-${cluster}" config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+
     # Create kubeconfig with insecure-skip-tls-verify for Kind clusters
     cat > "${SCRIPT_DIR}/${cluster}.kubeconfig" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    insecure-skip-tls-verify: true
+    certificate-authority-data: ${CA_DATA}
     server: https://${cluster}-control-plane:6443
   name: ${cluster}
 contexts:

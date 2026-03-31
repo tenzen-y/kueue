@@ -25,7 +25,9 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,6 +35,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption"
+	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
@@ -234,6 +237,95 @@ var _ = ginkgo.Describe("Preemption", func() {
 
 			util.ExpectWorkloadsToHaveQuotaReservation(ctx, k8sClient, cq.Name, wl3)
 			util.ExpectWorkloadsToBePending(ctx, k8sClient, wl4)
+		})
+
+		ginkgo.It("Should issue preemption exactly once for each preempted workload", func() {
+			lowPrioWorkloadCount := 8
+			ginkgo.By("Creating low-priority workloads")
+			lowPriorityWorkloads := make([]*kueue.Workload, lowPrioWorkloadCount)
+			quota := resource.MustParse("4")
+			quotaPerWorker := quota.MilliValue() / int64(lowPrioWorkloadCount)
+			lowPrioRequests := resource.NewMilliQuantity(quotaPerWorker, resource.DecimalSI).String()
+
+			for i := range lowPrioWorkloadCount {
+				wl := utiltestingapi.MakeWorkload(fmt.Sprintf("low-priority-wl-%d", i+1), ns.Name).
+					Queue(kueue.LocalQueueName(q.Name)).
+					WorkloadPriorityClassRef("low-priority").
+					Priority(10).
+					PodSets(*utiltestingapi.MakePodSet("worker", 1).
+						Request(corev1.ResourceCPU, lowPrioRequests).
+						Obj()).
+					Obj()
+				util.MustCreate(ctx, k8sClient, wl)
+				lowPriorityWorkloads[i] = wl
+			}
+
+			ginkgo.By("Waiting for all workloads to be admitted")
+			util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, lowPriorityWorkloads...)
+			util.ExpectReservingActiveWorkloadsMetric(cq, len(lowPriorityWorkloads))
+
+			ginkgo.By("Creating the first high-priority workload")
+			firstHighPrio := utiltestingapi.MakeWorkload("first-high-prio", ns.Name).
+				Queue(kueue.LocalQueueName(q.Name)).
+				WorkloadPriorityClassRef("high-priority").
+				Priority(100).
+				PodSets(*utiltestingapi.MakePodSet("worker", 1).
+					Request(corev1.ResourceCPU, "4").
+					Obj()).
+				Obj()
+			util.MustCreate(ctx, k8sClient, firstHighPrio)
+
+			ginkgo.By("Verifying low-priority workloads are evicted")
+			gomega.Eventually(func(g gomega.Gomega) {
+				evictedWorkloads := util.FilterEvictedWorkloads(ctx, k8sClient, lowPriorityWorkloads...)
+				g.Expect(evictedWorkloads).To(gomega.HaveLen(lowPrioWorkloadCount))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+			ginkgo.By("Finishing eviction for preempted workloads")
+			util.FinishEvictionForWorkloads(ctx, k8sClient, lowPriorityWorkloads...)
+
+			ginkgo.By("Verifying the workload is admitted")
+			util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, firstHighPrio)
+
+			ginkgo.By("verify only one preemption event was emitted for each workload", func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					events, err := utiltesting.HasMatchingEvents(ctx, k8sClient, func(e *corev1.Event) bool {
+						return e.Reason == "PreemptedWorkload" &&
+							e.Type == corev1.EventTypeNormal &&
+							e.InvolvedObject.Kind == "Workload" &&
+							e.InvolvedObject.Namespace == ns.Name
+					})
+					g.Expect(err).NotTo(gomega.HaveOccurred())
+					g.Expect(events).To(gomega.HaveLen(len(lowPriorityWorkloads)))
+					for _, event := range events {
+						g.Expect(event.Count).To(gomega.Equal(int32(1)))
+					}
+				}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Finishing the first high priority workload")
+			util.FinishWorkloads(ctx, k8sClient, firstHighPrio)
+
+			ginkgo.By("Waiting for all low prio workloads to be re-admitted")
+			util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, lowPriorityWorkloads...)
+			util.ExpectReservingActiveWorkloadsMetric(cq, len(lowPriorityWorkloads))
+
+			ginkgo.By("Creating the second high-priority workload")
+			secondHighPrio := utiltestingapi.MakeWorkload("second-high-prio", ns.Name).
+				Queue(kueue.LocalQueueName(q.Name)).
+				WorkloadPriorityClassRef("high-priority").
+				Priority(100).
+				PodSets(*utiltestingapi.MakePodSet("worker", 1).
+					Request(corev1.ResourceCPU, "4").
+					Obj()).
+				Obj()
+			util.MustCreate(ctx, k8sClient, secondHighPrio)
+
+			ginkgo.By("Verifying all low-priority workloads are evicted")
+			gomega.Eventually(func(g gomega.Gomega) {
+				evictedWorkloads := util.FilterEvictedWorkloads(ctx, k8sClient, lowPriorityWorkloads...)
+				g.Expect(evictedWorkloads).To(gomega.HaveLen(lowPrioWorkloadCount))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 		})
 
 		ginkgo.It("Should include job UID in preemption condition when the label is set", func() {
@@ -1130,6 +1222,80 @@ var _ = ginkgo.Describe("Preemption", func() {
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 			util.ExpectWorkloadsToHaveQuotaReservation(ctx, k8sClient, cq.Name, lowWl)
 			util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, lowWl)
+		})
+	})
+
+	ginkgo.Context("Queue head is preemption gated", func() {
+		var (
+			cq *kueue.ClusterQueue
+			q  *kueue.LocalQueue
+		)
+
+		ginkgo.BeforeEach(func() {
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.MultiKueueOrchestratedPreemption, true)
+
+			cq = utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("alpha").Resource(corev1.ResourceCPU, "2").Obj()).
+				Preemption(kueue.ClusterQueuePreemption{
+					WithinClusterQueue: kueue.PreemptionPolicyLowerPriority,
+				}).
+				Obj()
+			util.MustCreate(ctx, k8sClient, cq)
+
+			q = utiltestingapi.MakeLocalQueue("q", ns.Name).ClusterQueue(cq.Name).Obj()
+			util.MustCreate(ctx, k8sClient, q)
+		})
+
+		ginkgo.AfterEach(func() {
+			gomega.Expect(util.DeleteWorkloadsInNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
+		})
+
+		ginkgo.It("Should not block lower priority workloads while the preemption gate is closed", func() {
+			lowWl := utiltestingapi.MakeWorkload("low", ns.Name).
+				Queue(kueue.LocalQueueName(q.Name)).
+				Priority(lowPriority).
+				Request(corev1.ResourceCPU, "1.5").
+				Obj()
+			lowWlKey := types.NamespacedName{Name: lowWl.Name, Namespace: lowWl.Namespace}
+
+			ginkgo.By("Creating low priority workload and waiting for it to reserve quota", func() {
+				util.MustCreate(ctx, k8sClient, lowWl)
+				util.ExpectWorkloadsToHaveQuotaReservation(ctx, k8sClient, cq.Name, lowWl)
+			})
+
+			highWl := utiltestingapi.MakeWorkload("high", ns.Name).
+				Queue(kueue.LocalQueueName(q.Name)).
+				PreemptionGates(kueue.PreemptionGate{Name: "testgate"}).
+				Priority(highPriority).
+				Request(corev1.ResourceCPU, "1").
+				Obj()
+			highWlKey := types.NamespacedName{Name: highWl.Name, Namespace: highWl.Namespace}
+
+			ginkgo.By("Creating a preemption gated, high priority workload and waiting for it to be pending", func() {
+				util.MustCreate(ctx, k8sClient, highWl)
+				util.ExpectWorkloadsToBePending(ctx, k8sClient, highWl)
+			})
+
+			ginkgo.By("Checking that the lower priority workload was not preempted", func() {
+				gomega.Consistently(func(g gomega.Gomega) {
+					g.Expect(k8sClient.Get(ctx, lowWlKey, lowWl)).To(gomega.Succeed())
+					g.Expect(k8sClient.Get(ctx, highWlKey, highWl)).To(gomega.Succeed())
+
+					g.Expect(workload.HasQuotaReservation(lowWl)).To(gomega.BeTrue())
+					g.Expect(workload.HasQuotaReservation(highWl)).To(gomega.BeFalse())
+				}, util.ConsistentDuration, util.Interval).Should(gomega.Succeed())
+			})
+
+			lowWl2 := utiltestingapi.MakeWorkload("low2", ns.Name).
+				Queue(kueue.LocalQueueName(q.Name)).
+				Priority(lowPriority).
+				Request(corev1.ResourceCPU, "0.5").
+				Obj()
+			ginkgo.By("Creating a second, small low priority workload and waiting for it to reserve quota", func() {
+				util.MustCreate(ctx, k8sClient, lowWl2)
+				util.ExpectWorkloadsToHaveQuotaReservation(ctx, k8sClient, cq.Name, lowWl2)
+			})
 		})
 	})
 })

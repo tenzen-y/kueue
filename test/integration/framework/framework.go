@@ -28,12 +28,14 @@ import (
 	"time"
 
 	kfmpi "github.com/kubeflow/mpi-operator/pkg/apis/kubeflow/v2beta1"
+	sparkv1beta2 "github.com/kubeflow/spark-operator/v2/api/v1beta2"
 	kftrainer "github.com/kubeflow/trainer/v2/pkg/apis/trainer/v1alpha1"
 	kftraining "github.com/kubeflow/training-operator/pkg/apis/kubeflow.org/v1"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	awv1beta2 "github.com/project-codeflare/appwrapper/api/v1beta2"
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
+	"go.uber.org/zap/zaptest/observer"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	autoscaling "k8s.io/autoscaler/cluster-autoscaler/apis/provisioningrequest/autoscaling.x-k8s.io/v1"
@@ -49,6 +51,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	jobsetapi "sigs.k8s.io/jobset/api/jobset/v1alpha2"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueuev1beta1 "sigs.k8s.io/kueue/apis/kueue/v1beta1"
@@ -78,10 +81,12 @@ type Framework struct {
 
 	managerCancel context.CancelFunc
 	managerDone   <-chan struct{}
+
+	ObservedLogs *observer.ObservedLogs
 }
 
 func (f *Framework) Init() *rest.Config {
-	util.SetupLogger()
+	f.ObservedLogs = util.SetupLoggerGetObservedLogs()
 
 	var cfg *rest.Config
 	ginkgo.By("bootstrapping test environment", func() {
@@ -163,6 +168,12 @@ func (f *Framework) SetupClient(cfg *rest.Config) (context.Context, client.WithW
 	err = inventoryv1alpha1.AddToScheme(f.scheme)
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 
+	err = leaderworkersetv1.AddToScheme(f.scheme)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+
+	err = sparkv1beta2.AddToScheme(f.scheme)
+	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+
 	k8sClient, err := client.NewWithWatch(cfg, client.Options{Scheme: f.scheme})
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	gomega.ExpectWithOffset(1, k8sClient).NotTo(gomega.BeNil())
@@ -212,16 +223,14 @@ func (f *Framework) StartManager(ctx context.Context, cfg *rest.Config, managerS
 			gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "failed to run manager")
 		}()
 
-		if len(f.WebhookPath) > 0 {
-			// wait for the webhook server to get ready
-			dialer := &net.Dialer{Timeout: time.Second}
-			addrPort := fmt.Sprintf("%s:%d", webhookInstallOptions.LocalServingHost, webhookInstallOptions.LocalServingPort)
-			gomega.Eventually(func(g gomega.Gomega) {
-				conn, err := tls.DialWithDialer(dialer, "tcp", addrPort, &tls.Config{InsecureSkipVerify: true})
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				conn.Close()
-			}, util.Timeout, util.Interval).Should(gomega.Succeed())
-		}
+		// wait for the webhook server to get ready
+		dialer := &net.Dialer{Timeout: time.Second}
+		addrPort := fmt.Sprintf("%s:%d", webhookInstallOptions.LocalServingHost, webhookInstallOptions.LocalServingPort)
+		gomega.Eventually(func(g gomega.Gomega) {
+			conn, err := tls.DialWithDialer(dialer, "tcp", addrPort, &tls.Config{InsecureSkipVerify: true})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			conn.Close()
+		}, util.Timeout, util.Interval).Should(gomega.Succeed())
 	})
 }
 
@@ -248,6 +257,7 @@ func (f *Framework) Teardown() {
 	}
 	err := f.testEnv.Stop()
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
+	util.VerifyLogs(f.ObservedLogs)
 }
 
 var (

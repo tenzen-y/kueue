@@ -334,6 +334,70 @@ It can be set to &quot;0&quot; to disable the metrics serving.</p>
 metrics will be reported.</p>
 </td>
 </tr>
+<tr><td><code>customLabels</code><br/>
+<a href="#config-kueue-x-k8s-io-v1beta2-ControllerMetricsCustomLabel"><code>[]ControllerMetricsCustomLabel</code></a>
+</td>
+<td>
+   <p>CustomLabels is a list of entries whose values will be added as extra
+Prometheus labels on ClusterQueue, LocalQueue, and Cohort metrics.
+Requires the CustomMetricLabels feature gate.</p>
+</td>
+</tr>
+<tr><td><code>localQueueMetrics</code><br/>
+<a href="#config-kueue-x-k8s-io-v1beta2-LocalQueueMetrics"><code>LocalQueueMetrics</code></a>
+</td>
+<td>
+   <p>LocalQueueMetrics is a configuration that provides LocalQueue metrics options.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `ControllerMetricsCustomLabel`     {#config-kueue-x-k8s-io-v1beta2-ControllerMetricsCustomLabel}
+    
+
+**Appears in:**
+
+- [ControllerMetrics](#config-kueue-x-k8s-io-v1beta2-ControllerMetrics)
+
+
+<p>ControllerMetricsCustomLabel defines a Kubernetes label or annotation to promote
+as a Prometheus metric label with a &quot;custom_&quot; prefix.</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>name</code> <B>[Required]</B><br/>
+<code>string</code>
+</td>
+<td>
+   <p>Name is used as a suffix to build the Prometheus label: Kueue
+automatically prepends &quot;custom_&quot; (e.g., name: &quot;team&quot; becomes label &quot;custom_team&quot;).
+Must follow Prometheus label naming conventions: [a-zA-Z_][a-zA-Z0-9_]*.</p>
+</td>
+</tr>
+<tr><td><code>sourceLabelKey</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>SourceLabelKey is the Kubernetes label key to read the value from.
+Must be a valid Kubernetes qualified name.
+Mutually exclusive with SourceAnnotationKey.
+If neither is specified, defaults to Name.</p>
+</td>
+</tr>
+<tr><td><code>sourceAnnotationKey</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>SourceAnnotationKey is the Kubernetes annotation key to read the value from.
+Must be a valid Kubernetes qualified name.
+Mutually exclusive with SourceLabelKey.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -490,6 +554,7 @@ Possible options:</p>
 <li>&quot;batch/job&quot;</li>
 <li>&quot;kubeflow.org/mpijob&quot;</li>
 <li>&quot;ray.io/rayjob&quot;</li>
+<li>&quot;ray.io/rayservice&quot;</li>
 <li>&quot;ray.io/raycluster&quot;</li>
 <li>&quot;jobset.x-k8s.io/jobset&quot;</li>
 <li>&quot;kubeflow.org/paddlejob&quot;</li>
@@ -499,6 +564,7 @@ Possible options:</p>
 <li>&quot;kubeflow.org/jaxjob&quot;</li>
 <li>&quot;trainer.kubeflow.org/trainjob&quot;</li>
 <li>&quot;workload.codeflare.dev/appwrapper&quot;</li>
+<li>&quot;sparkoperator.k8s.io/sparkapplication&quot;</li>
 <li>&quot;pod&quot;</li>
 <li>&quot;deployment&quot;</li>
 <li>&quot;statefulset&quot;</li>
@@ -576,6 +642,40 @@ Defaults to kueue-webhook-service.</p>
 <td>
    <p>WebhookSecretName is the name of the Secret used to store CA and server certs.
 Defaults to kueue-webhook-server-cert.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `LocalQueueMetrics`     {#config-kueue-x-k8s-io-v1beta2-LocalQueueMetrics}
+    
+
+**Appears in:**
+
+- [ControllerMetrics](#config-kueue-x-k8s-io-v1beta2-ControllerMetrics)
+
+
+<p>LocalQueueMetrics defines the configuration options for local queue metrics.
+If left empty, then metrics will expose for all local queues across namespaces.</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>enable</code><br/>
+<code>bool</code>
+</td>
+<td>
+   <p>Enable is a knob to allow metrics to be exposed for local queues. Defaults to true.</p>
+</td>
+</tr>
+<tr><td><code>localQueueSelector</code><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#labelselector-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.LabelSelector</code></a>
+</td>
+<td>
+   <p>LocalQueueSelector can be used to choose the local queues that need metrics to be collected.</p>
 </td>
 </tr>
 </tbody>
@@ -930,6 +1030,38 @@ The default would be to not set this value and inherit golang settings.</p>
 Note that TLS 1.3 ciphersuites are not configurable.
 Values are from tls package constants (https://golang.org/pkg/crypto/tls/#pkg-constants).
 The default would be to not set this value and inherit golang settings.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `VisibilityServerConfiguration`     {#config-kueue-x-k8s-io-v1beta2-VisibilityServerConfiguration}
+    
+
+**Appears in:**
+
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>bindAddress</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>BindAddress is the IP address the visibility server listens on.
+Defaults to 0.0.0.0 (all network interfaces).</p>
+</td>
+</tr>
+<tr><td><code>bindPort</code><br/>
+<code>int32</code>
+</td>
+<td>
+   <p>BindPort is the port the visibility server listens on.
+Defaults to 8082.</p>
 </td>
 </tr>
 </tbody>

@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/kueue/test/util"
 )
 
-var _ = ginkgo.Describe("Job reconciliation with ManagedJobsNamespaceSelectorAlwaysRespected", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Job reconciliation with ManagedJobsNamespaceSelectorAlwaysRespected", ginkgo.Label("feature:managedjobsnamespaceselectoralwaysrespected"), ginkgo.Ordered, func() {
 	const (
 		cqName = "cluster-queue"
 		rfName = "default"
@@ -48,7 +48,7 @@ var _ = ginkgo.Describe("Job reconciliation with ManagedJobsNamespaceSelectorAlw
 	)
 
 	ginkgo.BeforeAll(func() {
-		util.UpdateKueueConfiguration(ctx, k8sClient, defaultKueueCfg, kindClusterName, func(cfg *config.Configuration) {
+		util.UpdateKueueConfigurationAndRestart(ctx, k8sClient, defaultKueueCfg, kindClusterName, func(cfg *config.Configuration) {
 			cfg.FeatureGates = map[string]bool{string(features.ManagedJobsNamespaceSelectorAlwaysRespected): true}
 			cfg.ManagedJobsNamespaceSelector = &metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
@@ -85,8 +85,8 @@ var _ = ginkgo.Describe("Job reconciliation with ManagedJobsNamespaceSelectorAlw
 
 	ginkgo.AfterAll(func() {
 		gomega.Expect(util.DeleteNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
-		util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, cq, true, util.LongTimeout)
-		util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, rf, true, util.LongTimeout)
+		util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, cq, true, util.MediumTimeout)
+		util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, rf, true, util.MediumTimeout)
 	})
 
 	ginkgo.When("Testing namespace selector behavior", func() {

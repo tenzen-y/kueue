@@ -101,9 +101,6 @@ description: Generated API reference documentation for kueue.x-k8s.io/v1beta2.
 
 
 <p>Cohort defines the Cohorts API.</p>
-<p>Hierarchical Cohorts (any Cohort which has a parent) are compatible
-with Fair Sharing as of v0.11. Using these features together in
-V0.9 and V0.10 is unsupported, and results in undefined behavior.</p>
 
 
 <table class="table">
@@ -1302,9 +1299,6 @@ The is recorded only when Fair Sharing is enabled in the Kueue configuration.</p
 
 <p>FairSharing contains the properties of the ClusterQueue or Cohort,
 when participating in FairSharing.</p>
-<p>Fair Sharing is compatible with Hierarchical Cohorts (any Cohort
-which has a parent) as of v0.11. Using these features together in
-V0.9 and V0.10 is unsupported, and results in undefined behavior.</p>
 
 
 <table class="table">
@@ -2363,6 +2357,19 @@ Kueue finds a requested topology domain on a level defined
 in <code>kueue.x-k8s.io/podset-slice-required-topology</code> annotation.</p>
 </td>
 </tr>
+<tr><td><code>podsetSliceRequiredTopologyConstraints</code><br/>
+<a href="#kueue-x-k8s-io-v1beta2-PodsetSliceRequiredTopologyConstraint"><code>[]PodsetSliceRequiredTopologyConstraint</code></a>
+</td>
+<td>
+   <p>podsetSliceRequiredTopologyConstraints defines all layers of slice
+topology constraints. Each entry specifies a topology level and slice
+size, from the outermost (coarsest) to the innermost (finest) layer.
+At most 3 layers are supported.
+This field is mutually exclusive with podSetSliceRequiredTopology and
+podSetSliceSize.</p>
+<p>This annotation is alpha-level for the TASMultiLayerTopology feature gate.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -2418,6 +2425,113 @@ result in failure during workload admission.</p>
 </td>
 <td>
    <p>tolerations of the PodSet to modify.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `PodsetSliceRequiredTopologyConstraint`     {#kueue-x-k8s-io-v1beta2-PodsetSliceRequiredTopologyConstraint}
+    
+
+**Appears in:**
+
+- [PodSetTopologyRequest](#kueue-x-k8s-io-v1beta2-PodSetTopologyRequest)
+
+
+<p>PodsetSliceRequiredTopologyConstraint defines a single slice topology constraint layer.</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>topology</code> <B>[Required]</B><br/>
+<code>string</code>
+</td>
+<td>
+   <p>topology indicates the topology level required for this slice layer.</p>
+</td>
+</tr>
+<tr><td><code>size</code> <B>[Required]</B><br/>
+<code>int32</code>
+</td>
+<td>
+   <p>size indicates the number of pods in each group at this slice layer.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `PreemptionGate`     {#kueue-x-k8s-io-v1beta2-PreemptionGate}
+    
+
+**Appears in:**
+
+- [WorkloadSpec](#kueue-x-k8s-io-v1beta2-WorkloadSpec)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>name</code> <B>[Required]</B><br/>
+<code>string</code>
+</td>
+<td>
+   <p>name identifies the preemption gate.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `PreemptionGatePosition`     {#kueue-x-k8s-io-v1beta2-PreemptionGatePosition}
+    
+(Alias of `string`)
+
+**Appears in:**
+
+- [PreemptionGateState](#kueue-x-k8s-io-v1beta2-PreemptionGateState)
+
+
+
+
+
+## `PreemptionGateState`     {#kueue-x-k8s-io-v1beta2-PreemptionGateState}
+    
+
+**Appears in:**
+
+- [WorkloadStatus](#kueue-x-k8s-io-v1beta2-WorkloadStatus)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>name</code> <B>[Required]</B><br/>
+<code>string</code>
+</td>
+<td>
+   <p>name identifies the preemption gate.</p>
+</td>
+</tr>
+<tr><td><code>position</code> <B>[Required]</B><br/>
+<a href="#kueue-x-k8s-io-v1beta2-PreemptionGatePosition"><code>PreemptionGatePosition</code></a>
+</td>
+<td>
+   <p>position of the preemption gate. One of</p>
+</td>
+</tr>
+<tr><td><code>lastTransitionTime,omitempty,omitzero</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.Time</code></a>
+</td>
+<td>
+   <p>lastTransitionTime is the last time the gate transitioned from one status to another.</p>
 </td>
 </tr>
 </tbody>
@@ -2972,7 +3086,7 @@ quantity of quota equal to nominalQuota+borrowingLimit, assuming the other
 ClusterQueues in the cohort have enough unused quota.
 If null, it means that there is no borrowing limit.
 If not null, it must be non-negative.
-borrowingLimit must be null if spec.cohort is empty.</p>
+borrowingLimit must be null if spec.cohortName is empty.</p>
 </td>
 </tr>
 <tr><td><code>lendingLimit</code><br/>
@@ -2986,7 +3100,7 @@ a quantity of quota equals to nominalQuota - lendingLimit.
 If null, it means that there is no lending limit, meaning that
 all the nominalQuota can be borrowed by other clusterQueues in the cohort.
 If not null, it must be non-negative.
-lendingLimit must be null if spec.cohort is empty.
+lendingLimit must be null if spec.cohortName is empty.
 This field is in beta stage and is enabled by default.</p>
 </td>
 </tr>
@@ -3465,6 +3579,15 @@ the workload can be admitted before it's automatically deactivated.</p>
 <p>If unspecified, no execution time limit is enforced on the Workload.</p>
 </td>
 </tr>
+<tr><td><code>preemptionGates</code><br/>
+<a href="#kueue-x-k8s-io-v1beta2-PreemptionGate"><code>[]PreemptionGate</code></a>
+</td>
+<td>
+   <p>preemptionGates is a list of gates governing whether the workload
+can trigger preemptions.
+The gates are closed by default.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -3586,6 +3709,14 @@ affinity or propagation policies across workload slices.</p>
 when Topology-Aware Scheduling is used. This field should not be set by the users.
 It indicates Kueue's scheduler is searching for replacements of the failed nodes.
 Requires enabling the TASFailedNodeReplacement feature gate.</p>
+</td>
+</tr>
+<tr><td><code>preemptionGates</code><br/>
+<a href="#kueue-x-k8s-io-v1beta2-PreemptionGateState"><code>[]PreemptionGateState</code></a>
+</td>
+<td>
+   <p>preemptionGates is a list of states of gates governing whether the workload
+can trigger preemptions.</p>
 </td>
 </tr>
 </tbody>

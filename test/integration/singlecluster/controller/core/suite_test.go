@@ -32,7 +32,11 @@ import (
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
+	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/metrics"
 	"sigs.k8s.io/kueue/pkg/scheduler"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
+	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -59,20 +63,33 @@ var _ = ginkgo.BeforeSuite(func() {
 	}
 	cfg = fwk.Init()
 	ctx, k8sClient = fwk.SetupClient(cfg)
+	metrics.Register()
 })
 
 var _ = ginkgo.AfterSuite(func() {
 	fwk.Teardown()
 })
 
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+})
+
 type managerSetupOpts struct {
 	runScheduler bool
+	roleTracker  *roletracker.RoleTracker
 }
 
 type managerSetupOption func(*managerSetupOpts)
 
 func runScheduler(opts *managerSetupOpts) {
 	opts.runScheduler = true
+}
+
+func withRoleTracker(rt *roletracker.RoleTracker) managerSetupOption {
+	return func(opts *managerSetupOpts) {
+		opts.roleTracker = rt
+	}
 }
 
 func managerSetup(ctx context.Context, mgr manager.Manager) {
@@ -104,14 +121,43 @@ func managerAndControllerSetup(controllersCfg *config.Configuration, options ...
 
 		controllersCfg.Metrics.EnableClusterQueueResources = true
 
-		cCache := schdcache.New(mgr.GetClient())
-		queues := qcache.NewManager(mgr.GetClient(), cCache)
+		lqMetrics := metrics.NewLocalQueueMetricsConfig(controllersCfg.Metrics.LocalQueueMetrics)
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, nil)
+		var customLabels *metrics.CustomLabels
+		if features.Enabled(features.CustomMetricLabels) && len(controllersCfg.Metrics.CustomLabels) > 0 {
+			customLabels = metrics.NewCustomLabels(controllersCfg.Metrics.CustomLabels)
+		}
+
+		cacheOpts := []schdcache.Option{
+			schdcache.WithResourceMetrics(controllersCfg.Metrics.EnableClusterQueueResources),
+			schdcache.WithRoleTracker(opts.roleTracker),
+			schdcache.WithLocalQueueMetrics(lqMetrics),
+			schdcache.WithCustomLabels(customLabels),
+		}
+		preemptionExpectations := preemptexpectations.New()
+		queueOpts := []qcache.Option{
+			qcache.WithRoleTracker(opts.roleTracker),
+			qcache.WithLocalQueueMetrics(lqMetrics),
+			qcache.WithCustomLabels(customLabels),
+			qcache.WithPreemptionExpectations(preemptionExpectations),
+		}
+
+		cCache := schdcache.New(mgr.GetClient(), cacheOpts...)
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOpts...)
+
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, opts.roleTracker, preemptionExpectations, customLabels)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
+		if opts.roleTracker != nil {
+			opts.roleTracker.OnElected(func() {
+				metrics.ClearGaugeMetricsForRole(roletracker.RoleFollower)
+				cCache.ResyncGaugeMetrics()
+				queues.ResyncGaugeMetrics()
+			})
+		}
+
 		if opts.runScheduler {
-			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName))
+			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations), scheduler.WithCustomLabels(customLabels))
 			err = sched.Start(ctx)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}

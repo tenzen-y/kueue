@@ -18,6 +18,8 @@ package workload
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -48,6 +50,8 @@ import (
 	"sigs.k8s.io/kueue/pkg/resources"
 	"sigs.k8s.io/kueue/pkg/util/api"
 	clientutil "sigs.k8s.io/kueue/pkg/util/client"
+	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
+	"sigs.k8s.io/kueue/pkg/util/podset"
 	"sigs.k8s.io/kueue/pkg/util/priority"
 	utilptr "sigs.k8s.io/kueue/pkg/util/ptr"
 	utilqueue "sigs.k8s.io/kueue/pkg/util/queue"
@@ -63,11 +67,15 @@ const (
 	StatusQuotaReserved = "quotaReserved"
 	StatusAdmitted      = "admitted"
 	StatusFinished      = "finished"
+
+	// SchedulingHashUnknown indicates the scheduling hash could not be computed.
+	SchedulingHashUnknown = "unknown"
 )
 
 var (
 	admissionManagedConditions = []string{
 		kueue.WorkloadQuotaReserved,
+		kueue.WorkloadBlockedOnPreemptionGates,
 		kueue.WorkloadEvicted,
 		kueue.WorkloadAdmitted,
 		kueue.WorkloadPreempted,
@@ -102,9 +110,9 @@ type AssignmentClusterQueueState struct {
 	ClusterQueueGeneration int64
 }
 
-// dra holds DRA-specific configuration for workload.Info construction.
 type dra struct {
-	preprocessedDRAResources map[kueue.PodSetReference]corev1.ResourceList
+	preprocessedDRAResources  map[kueue.PodSetReference]corev1.ResourceList
+	replacedExtendedResources map[kueue.PodSetReference]sets.Set[corev1.ResourceName]
 }
 
 type InfoOptions struct {
@@ -131,11 +139,15 @@ func WithResourceTransformations(transforms []config.ResourceTransformation) Inf
 	}
 }
 
-// WithPreprocessedDRAResources creates an InfoOption that provides preprocessed DRA resources.
-func WithPreprocessedDRAResources(draResources map[kueue.PodSetReference]corev1.ResourceList) InfoOption {
+// WithPreprocessedDRAResources provides DRA resources to add and extended resources to remove.
+func WithPreprocessedDRAResources(
+	draResources map[kueue.PodSetReference]corev1.ResourceList,
+	replacedExtendedResources map[kueue.PodSetReference]sets.Set[corev1.ResourceName],
+) InfoOption {
 	return func(o *InfoOptions) {
 		o.dra = dra{
-			preprocessedDRAResources: draResources,
+			preprocessedDRAResources:  draResources,
+			replacedExtendedResources: replacedExtendedResources,
 		}
 	}
 }
@@ -198,6 +210,16 @@ type Info struct {
 
 	// SecondPassIteration indicates the current iteration of the second pass scheduling.
 	SecondPassIteration int
+
+	// LastEvaluatedGeneration stores the Obj.Generation at the time the scheduler
+	// popped this workload for evaluation. Used by PushOrUpdate to detect spec
+	// changes masked by RequeueWorkload's info.Update.
+	LastEvaluatedGeneration int64
+
+	// SchedulingHash identifies the workload's scheduling equivalence class.
+	// Workloads with the same hash have identical scheduling-relevant shape
+	// and will receive the same FlavorAssigner result given the same cluster state.
+	SchedulingHash string
 }
 
 type PodSetResources struct {
@@ -274,8 +296,56 @@ func NewInfo(w *kueue.Workload, opts ...InfoOption) *Info {
 	return info
 }
 
-func (i *Info) Update(wl *kueue.Workload) {
+// UpdateSchedulingHash computes and sets the scheduling hash using the
+// provided contextual logger. Call this after NewInfo in production code.
+func (i *Info) UpdateSchedulingHash(log logr.Logger) {
+	i.SchedulingHash = computeSchedulingHash(log, i.Obj, i.TotalRequests)
+}
+
+// Update refreshes the object reference and recomputes the scheduling hash
+// to reflect any changes (e.g., priority updates).
+func (i *Info) Update(log logr.Logger, wl *kueue.Workload) {
+	log.V(5).Info("Workload info updated", "workload", klog.KObj(wl))
 	i.Obj = wl
+	i.UpdateSchedulingHash(log)
+}
+
+// computeSchedulingHash returns a deterministic hash of the workload's
+// scheduling-relevant shape: effective workload priority, pod spec (via
+// SpecShape), effective count, minCount, and topologyRequest per PodSet.
+func computeSchedulingHash(log logr.Logger, wl *kueue.Workload, totalRequests []PodSetResources) string {
+	if !features.Enabled(features.SchedulingEquivalenceHashing) {
+		return SchedulingHashUnknown
+	}
+	effectivePriority := priority.EffectivePriority(log, wl)
+	podSetShapes := make([]map[string]any, 0, len(wl.Spec.PodSets))
+	for i, ps := range wl.Spec.PodSets {
+		effectiveCount := ps.Count
+		if i < len(totalRequests) {
+			effectiveCount = totalRequests[i].Count
+		}
+		podSetShapes = append(podSetShapes, map[string]any{
+			"name":            ps.Name,
+			"spec":            utilpod.SpecShape(&ps.Template.Spec),
+			"count":           effectiveCount,
+			"minCount":        ps.MinCount,
+			"topologyRequest": ps.TopologyRequest,
+		})
+	}
+	shape := map[string]any{
+		"podSets":  podSetShapes,
+		"priority": effectivePriority,
+	}
+	shapeJSON, err := json.Marshal(shape)
+	if err != nil {
+		log.Error(err, "Failed to compute scheduling hash", "workload", klog.KObj(wl))
+		return SchedulingHashUnknown
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(shapeJSON))[:16]
+	if logV := log.V(5); logV.Enabled() {
+		logV.Info("Computed scheduling hash", "workload", klog.KObj(wl), "hash", hash, "shapeJSON", string(shapeJSON))
+	}
+	return hash
 }
 
 func (i *Info) CanBePartiallyAdmitted() bool {
@@ -325,7 +395,6 @@ func dropExcludedResources(input corev1.ResourceList, excludedPrefixes []string)
 }
 
 func (i *Info) CalcLocalQueueFSUsage(ctx context.Context, c client.Client, resWeights map[corev1.ResourceName]float64, afsEntryPenalties *queueafs.AfsEntryPenalties, afsConsumedResources *queueafs.AfsConsumedResources) (float64, error) {
-	var usage float64
 	lqKey := utilqueue.KeyFromWorkload(i.Obj)
 
 	consumed := corev1.ResourceList{}
@@ -341,25 +410,32 @@ func (i *Info) CalcLocalQueueFSUsage(ctx context.Context, c client.Client, resWe
 		penalty = afsEntryPenalties.Peek(lqKey)
 	}
 
+	var lq kueue.LocalQueue
+	lqObjKey := client.ObjectKey{Namespace: i.Obj.Namespace, Name: string(i.Obj.Spec.QueueName)}
+	if err := c.Get(ctx, lqObjKey, &lq); err != nil {
+		return 0, err
+	}
+	var lqWeight float64 = 1
+	if lq.Spec.FairSharing != nil && lq.Spec.FairSharing.Weight != nil {
+		lqWeight = lq.Spec.FairSharing.Weight.AsApproximateFloat64()
+	}
+	return CalcFSUsageFromResources(consumed, penalty, lqWeight, resWeights), nil
+}
+
+// CalcFSUsageFromResources computes fair-sharing usage from consumed resources
+// and penalties. Keys are iterated in sorted order for deterministic results.
+func CalcFSUsageFromResources(consumed, penalty corev1.ResourceList, lqWeight float64, resWeights map[corev1.ResourceName]float64) float64 {
 	allResources := resource.MergeResourceListKeepSum(consumed, penalty)
-	for resName, resVal := range allResources {
+	var usage float64
+	for _, resName := range slices.Sorted(maps.Keys(allResources)) {
+		resVal := allResources[resName]
 		weight, found := resWeights[resName]
 		if !found {
 			weight = 1
 		}
 		usage += weight * resVal.AsApproximateFloat64()
 	}
-
-	var lq kueue.LocalQueue
-	lqObjKey := client.ObjectKey{Namespace: i.Obj.Namespace, Name: string(i.Obj.Spec.QueueName)}
-	if err := c.Get(ctx, lqObjKey, &lq); err != nil {
-		return 0, err
-	}
-	if lq.Spec.FairSharing != nil && lq.Spec.FairSharing.Weight != nil {
-		// if no weight for lq was defined, use default weight of 1
-		usage /= lq.Spec.FairSharing.Weight.AsApproximateFloat64()
-	}
-	return usage, nil
+	return usage / lqWeight
 }
 
 // IsUsingTAS returns information if the workload is using TAS
@@ -375,7 +451,7 @@ func IsExplicitlyRequestingTAS(podSets ...kueue.PodSet) bool {
 	return slices.ContainsFunc(podSets,
 		func(ps kueue.PodSet) bool {
 			tr := ps.TopologyRequest
-			return tr != nil && (tr.Unconstrained != nil || tr.Required != nil || tr.Preferred != nil || tr.PodSetSliceRequiredTopology != nil || tr.PodSetSliceSize != nil)
+			return tr != nil && (tr.Unconstrained != nil || tr.Required != nil || tr.Preferred != nil || tr.PodSetSliceRequiredTopology != nil || tr.PodSetSliceSize != nil || len(tr.PodsetSliceRequiredTopologyConstraints) > 0)
 		})
 }
 
@@ -461,6 +537,13 @@ func Key(w *kueue.Workload) Reference {
 	return NewReference(w.Namespace, w.Name)
 }
 
+func GetLocalQueue(wl *kueue.Workload) kueue.LocalQueueName {
+	if wl == nil {
+		return ""
+	}
+	return wl.Spec.QueueName
+}
+
 func reclaimableCounts(wl *kueue.Workload) map[kueue.PodSetReference]int32 {
 	return utilslices.ToMap(wl.Status.ReclaimablePods, func(i int) (kueue.PodSetReference, int32) {
 		return wl.Status.ReclaimablePods[i].Name, wl.Status.ReclaimablePods[i].Count
@@ -510,6 +593,13 @@ func totalRequestsFromPodSets(wl *kueue.Workload, info *InfoOptions) []PodSetRes
 		effectiveRequests = applyResourceTransformations(effectiveRequests, info.resourceTransformations)
 		setRes.Requests = resources.NewRequests(effectiveRequests)
 		if features.Enabled(features.DynamicResourceAllocation) && info.preprocessedDRAResources != nil {
+			// First, remove extended resources that were converted to DRA logical resources
+			if replacedRes, exists := info.replacedExtendedResources[ps.Name]; exists {
+				for extRes := range replacedRes {
+					delete(setRes.Requests, extRes)
+				}
+			}
+			// Then, add the DRA logical resources
 			if draRes, exists := info.preprocessedDRAResources[ps.Name]; exists {
 				for resName, quantity := range draRes {
 					if setRes.Requests == nil {
@@ -778,6 +868,10 @@ func SetQuotaReservation(w *kueue.Workload, admission *kueue.Admission, clock cl
 		changed = true
 	}
 
+	if resetActiveCondition(&w.Status.Conditions, w.Generation, kueue.WorkloadBlockedOnPreemptionGates, reason, clock) {
+		changed = true
+	}
+
 	return changed
 }
 
@@ -878,6 +972,64 @@ func SetFinishedCondition(w *kueue.Workload, now time.Time, reason string, messa
 	return apimeta.SetStatusCondition(&w.Status.Conditions, condition)
 }
 
+func SetBlockedOnPreemptionGatesCondition(w *kueue.Workload, now time.Time, reason string, message string) bool {
+	condition := metav1.Condition{
+		Type:               kueue.WorkloadBlockedOnPreemptionGates,
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(now),
+		Reason:             reason,
+		Message:            api.TruncateConditionMessage(message),
+		ObservedGeneration: w.Generation,
+	}
+	return apimeta.SetStatusCondition(&w.Status.Conditions, condition)
+}
+
+// HasClosedPreemptionGate checks if the workload contains any PreemptionGate
+// that is considered closed, preventing it from triggering preemptions.
+func HasClosedPreemptionGate(w *kueue.Workload) bool {
+	gatePositions := make(map[string]kueue.PreemptionGatePosition)
+	for _, gateState := range w.Status.PreemptionGates {
+		gatePositions[gateState.Name] = gateState.Position
+	}
+
+	return slices.ContainsFunc(w.Spec.PreemptionGates, func(pg kueue.PreemptionGate) bool {
+		position, hasPosition := gatePositions[pg.Name]
+		// Preemption gates that are present only in `.spec` are considered closed.
+		// This ensures that the workload can be created gated atomically.
+		if !hasPosition {
+			return true
+		}
+		return position == kueue.PreemptionGatePositionClosed
+	})
+}
+
+// SetPreemptionGatePosition sets the position of a preemption gate with the given name.
+func SetPreemptionGatePosition(w *kueue.Workload, gateName string, gatePosition kueue.PreemptionGatePosition, transitionTime metav1.Time) bool {
+	gateIdx := slices.IndexFunc(w.Spec.PreemptionGates, func(gate kueue.PreemptionGate) bool {
+		return gate.Name == gateName
+	})
+	if gateIdx == -1 {
+		return false
+	}
+
+	gateStateIdx := slices.IndexFunc(w.Status.PreemptionGates, func(gate kueue.PreemptionGateState) bool {
+		return gate.Name == gateName
+	})
+
+	if gateStateIdx == -1 {
+		w.Status.PreemptionGates = append(w.Status.PreemptionGates, kueue.PreemptionGateState{
+			Name:               gateName,
+			Position:           gatePosition,
+			LastTransitionTime: transitionTime,
+		})
+	} else {
+		w.Status.PreemptionGates[gateStateIdx].Position = gatePosition
+		w.Status.PreemptionGates[gateStateIdx].LastTransitionTime = transitionTime
+	}
+
+	return true
+}
+
 // PropagateResourceRequests synchronizes w.Status.ResourceRequests to
 // with info.TotalRequests if the feature gate is enabled and returns true if w was updated
 func PropagateResourceRequests(w *kueue.Workload, info *Info) bool {
@@ -936,6 +1088,7 @@ func admissionStatusPatch(w *kueue.Workload, wlCopy *kueue.Workload) {
 	wlCopy.Status.ClusterName = w.Status.ClusterName
 	wlCopy.Status.NominatedClusterNames = w.Status.NominatedClusterNames
 	wlCopy.Status.UnhealthyNodes = w.Status.UnhealthyNodes
+	wlCopy.Status.PreemptionGates = w.Status.PreemptionGates
 }
 
 func admissionChecksStatusPatch(w *kueue.Workload, wlCopy *kueue.Workload, c clock.Clock) {
@@ -1060,7 +1213,7 @@ func patchStatus(ctx context.Context, c client.Client, wl *kueue.Workload, owner
 		if updated, err := update(wlCopy); err != nil || !updated {
 			return err
 		}
-		err := c.Status().Patch(ctx, wlCopy, client.Apply, owner, client.ForceOwnership)
+		err := c.Status().Patch(ctx, wlCopy, client.Apply, owner, client.ForceOwnership) //nolint:staticcheck //SA1019: client.Apply is deprecated
 		if err != nil {
 			return err
 		}
@@ -1162,7 +1315,27 @@ func IsActive(w *kueue.Workload) bool {
 
 // IsAdmissible returns true if the workload can be added to the queue.
 func IsAdmissible(w *kueue.Workload) bool {
-	return !IsFinished(w) && IsActive(w) && !HasQuotaReservation(w)
+	return !HasAdmissionGate(w) && !IsFinished(w) && IsActive(w) && !HasQuotaReservation(w)
+}
+
+// HasAdmissionGate returns true if the workload has an admission gate annotation and the AdmissionGatedBy feature is on
+func HasAdmissionGate(w *kueue.Workload) bool {
+	if !features.Enabled(features.AdmissionGatedBy) || w.Annotations == nil {
+		return false
+	}
+
+	if val, exists := w.Annotations[constants.AdmissionGatedByAnnotation]; exists {
+		return val != ""
+	}
+
+	return false
+}
+
+// HasActiveQuotaReservation returns true if the workload has an active quota
+// reservation that should be tracked for ClusterQueue usage. This requires the
+// workload to be active, not finished, and holding a quota reservation.
+func HasActiveQuotaReservation(w *kueue.Workload) bool {
+	return HasQuotaReservation(w) && !IsFinished(w) && IsActive(w)
 }
 
 // HasDRA returns true if the workload has DRA resources (ResourceClaims or ResourceClaimTemplates).
@@ -1272,6 +1445,41 @@ func HasTopologyAssignmentWithUnhealthyNode(w *kueue.Workload) bool {
 	return false
 }
 
+// IsAdmittedByTAS checks if a workload is admitted by TAS.
+func IsAdmittedByTAS(w *kueue.Workload) bool {
+	return w.Status.Admission != nil && IsAdmitted(w) &&
+		slices.ContainsFunc(w.Status.Admission.PodSetAssignments,
+			func(psa kueue.PodSetAssignment) bool {
+				return psa.TopologyAssignment != nil
+			})
+}
+
+// PodSetsOnNode returns the PodSets of a workload that are assigned to a specific node.
+func PodSetsOnNode(w *kueue.Workload, nodeName string) []kueue.PodSet {
+	if w.Status.Admission == nil {
+		return nil
+	}
+	var result []kueue.PodSet
+	for _, psa := range w.Status.Admission.PodSetAssignments {
+		if psa.TopologyAssignment == nil || !tas.IsLowestLevelHostname(psa.TopologyAssignment.Levels) {
+			continue
+		}
+		assigned := false
+		for val := range tas.LowestLevelValues(psa.TopologyAssignment) {
+			if val == nodeName {
+				assigned = true
+				break
+			}
+		}
+		if assigned {
+			if ps := podset.FindPodSetByName(w.Spec.PodSets, psa.Name); ps != nil {
+				result = append(result, *ps)
+			}
+		}
+	}
+	return result
+}
+
 func CreatePodsReadyCondition(status metav1.ConditionStatus, reason, message string, clock clock.Clock) metav1.Condition {
 	return metav1.Condition{
 		Type:               kueue.WorkloadPodsReady,
@@ -1367,7 +1575,7 @@ func EvictWithRetryOnConflictForPatch() EvictOption {
 	}
 }
 
-func Evict(ctx context.Context, c client.Client, recorder record.EventRecorder, wl *kueue.Workload, reason, msg string, underlyingCause kueue.EvictionUnderlyingCause, clock clock.Clock, tracker *roletracker.RoleTracker, options ...EvictOption) error {
+func Evict(ctx context.Context, c client.Client, recorder record.EventRecorder, wl *kueue.Workload, reason, msg string, underlyingCause kueue.EvictionUnderlyingCause, clock clock.Clock, exposeLqMetrics bool, tracker *roletracker.RoleTracker, cl *metrics.CustomLabels, options ...EvictOption) error {
 	opts := DefaultEvictOptions()
 	for _, opt := range options {
 		opt(opts)
@@ -1411,14 +1619,14 @@ func Evict(ctx context.Context, c client.Client, recorder record.EventRecorder, 
 		log.V(3).Info("WARNING: unexpected eviction of workload without status.Admission", "workload", klog.KObj(wl))
 		return nil
 	}
-	reportEvictedWorkload(recorder, wl, wl.Status.Admission.ClusterQueue, reason, msg, underlyingCause, tracker)
+	reportEvictedWorkload(recorder, wl, wl.Status.Admission.ClusterQueue, reason, msg, underlyingCause, exposeLqMetrics, tracker, cl)
 	if reportWorkloadEvictedOnce {
-		metrics.ReportEvictedWorkloadsOnce(wl.Status.Admission.ClusterQueue, reason, string(underlyingCause), PriorityClassName(wl), tracker)
+		metrics.ReportEvictedWorkloadsOnce(wl.Status.Admission.ClusterQueue, reason, string(underlyingCause), PriorityClassName(wl), cl.CQGet(wl.Status.Admission.ClusterQueue), tracker)
 	}
 	return nil
 }
 
-func Finish(ctx context.Context, c client.Client, wl *kueue.Workload, reason, msg string, clock clock.Clock, tracker *roletracker.RoleTracker) error {
+func Finish(ctx context.Context, c client.Client, wl *kueue.Workload, reason, msg string, clock clock.Clock) error {
 	if IsFinished(wl) {
 		return nil
 	}
@@ -1427,11 +1635,6 @@ func Finish(ctx context.Context, c client.Client, wl *kueue.Workload, reason, ms
 	})
 	if err != nil {
 		return err
-	}
-	priorityClassName := PriorityClassName(wl)
-	metrics.IncrementFinishedWorkloadTotal(ptr.Deref(wl.Status.Admission, kueue.Admission{}).ClusterQueue, priorityClassName, tracker)
-	if features.Enabled(features.LocalQueueMetrics) {
-		metrics.IncrementLocalQueueFinishedWorkloadTotal(metrics.LQRefFromWorkload(wl), priorityClassName, tracker)
 	}
 	return nil
 }
@@ -1464,6 +1667,8 @@ func prepareForEviction(w *kueue.Workload, now time.Time, reason, message string
 	resetClusterNomination(w)
 	resetChecksOnEviction(w, now)
 	resetUnhealthyNodes(w)
+	unsetBlockedOnPreemptionGatesCondition(w, now, reason, message)
+	closeAllPreemptionGates(w, now)
 }
 
 func resetClusterNomination(w *kueue.Workload) {
@@ -1475,18 +1680,48 @@ func resetUnhealthyNodes(w *kueue.Workload) {
 	w.Status.UnhealthyNodes = nil
 }
 
-func reportEvictedWorkload(recorder record.EventRecorder, wl *kueue.Workload, cqName kueue.ClusterQueueReference, reason, message string, underlyingCause kueue.EvictionUnderlyingCause, tracker *roletracker.RoleTracker) {
-	priorityClassName := PriorityClassName(wl)
-	metrics.ReportEvictedWorkloads(cqName, reason, string(underlyingCause), priorityClassName, tracker)
-	if podsReadyToEvictionTime := workloadsWithPodsReadyToEvictedTime(wl); podsReadyToEvictionTime != nil {
-		metrics.PodsReadyToEvictedTimeSeconds.WithLabelValues(string(cqName), reason, string(underlyingCause), roletracker.GetRole(tracker)).Observe(podsReadyToEvictionTime.Seconds())
+func unsetBlockedOnPreemptionGatesCondition(w *kueue.Workload, now time.Time, reason, message string) {
+	preemptionSignalCond := apimeta.FindStatusCondition(w.Status.Conditions, kueue.WorkloadBlockedOnPreemptionGates)
+	if preemptionSignalCond == nil || preemptionSignalCond.Status != metav1.ConditionTrue {
+		return
 	}
-	if features.Enabled(features.LocalQueueMetrics) {
+
+	condition := metav1.Condition{
+		Type:               kueue.WorkloadBlockedOnPreemptionGates,
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(now),
+		Reason:             reason,
+		Message:            api.TruncateConditionMessage(message),
+		ObservedGeneration: w.Generation,
+	}
+	apimeta.SetStatusCondition(&w.Status.Conditions, condition)
+}
+
+func closeAllPreemptionGates(w *kueue.Workload, now time.Time) {
+	for i := range w.Status.PreemptionGates {
+		w.Status.PreemptionGates[i].Position = kueue.PreemptionGatePositionClosed
+		w.Status.PreemptionGates[i].LastTransitionTime = metav1.NewTime(now)
+	}
+}
+
+func reportEvictedWorkload(recorder record.EventRecorder, wl *kueue.Workload, cqName kueue.ClusterQueueReference,
+	reason, message string, underlyingCause kueue.EvictionUnderlyingCause, exposeLqMetrics bool,
+	tracker *roletracker.RoleTracker, cl *metrics.CustomLabels,
+) {
+	priorityClassName := PriorityClassName(wl)
+	cqCustomLabels := cl.CQGet(cqName)
+	metrics.ReportEvictedWorkloads(cqName, reason, string(underlyingCause), priorityClassName, cqCustomLabels, tracker)
+	if podsReadyToEvictionTime := workloadsWithPodsReadyToEvictedTime(wl); podsReadyToEvictionTime != nil {
+		metrics.ReportPodsReadyToEvictedTimeSeconds(cqName, reason, string(underlyingCause), *podsReadyToEvictionTime, cqCustomLabels, tracker)
+	}
+	if exposeLqMetrics {
+		lqRef := metrics.LQRefFromWorkload(wl)
 		metrics.ReportLocalQueueEvictedWorkloads(
-			metrics.LQRefFromWorkload(wl),
+			lqRef,
 			reason,
 			string(underlyingCause),
 			priorityClassName,
+			cl.LQGet(utilqueue.KeyFromWorkload(wl)),
 			tracker,
 		)
 	}
@@ -1497,8 +1732,8 @@ func reportEvictedWorkload(recorder record.EventRecorder, wl *kueue.Workload, cq
 	recorder.Event(wl, corev1.EventTypeNormal, eventReason, message)
 }
 
-func ReportPreemption(preemptingCqName kueue.ClusterQueueReference, preemptingReason string, targetCqName kueue.ClusterQueueReference, tracker *roletracker.RoleTracker) {
-	metrics.ReportPreemption(preemptingCqName, preemptingReason, targetCqName, tracker)
+func ReportPreemption(preemptingCqName kueue.ClusterQueueReference, preemptingReason string, targetCqName kueue.ClusterQueueReference, tracker *roletracker.RoleTracker, cl *metrics.CustomLabels) {
+	metrics.ReportPreemption(preemptingCqName, preemptingReason, targetCqName, cl.CQGet(preemptingCqName), tracker)
 }
 
 func References(wls []*Info) []klog.ObjectRef {
@@ -1564,7 +1799,7 @@ func ClusterName(wl *kueue.Workload) string {
 	return ptr.Deref(wl.Status.ClusterName, "")
 }
 
-func PriorityChanged(old, new *kueue.Workload) bool {
+func PriorityChanged(log logr.Logger, old, new *kueue.Workload) bool {
 	// Updates to Pod Priority are not supported.
 	if IsPodPriorityClass(old) || !IsWorkloadPriorityClass(new) {
 		return false
@@ -1574,6 +1809,26 @@ func PriorityChanged(old, new *kueue.Workload) bool {
 		PriorityClassName(old) != PriorityClassName(new) {
 		return true
 	}
-	// Check if priority value changed (for WorkloadPriorityClass value updates).
-	return priority.Priority(old) != priority.Priority(new)
+	// Check if effective priority changed (for WorkloadPriorityClass value updates or priority-boost annotation).
+	return priority.EffectivePriority(log, old) != priority.EffectivePriority(log, new)
+}
+
+// TASAssignedNodeNames extracts the unique set of node names that a Workload is assigned to.
+func TASAssignedNodeNames(wl *kueue.Workload) []string {
+	if !IsAdmittedByTAS(wl) {
+		return nil
+	}
+
+	nodesSet := sets.New[string]()
+	for _, psa := range wl.Status.Admission.PodSetAssignments {
+		if psa.TopologyAssignment == nil || !tas.IsLowestLevelHostname(psa.TopologyAssignment.Levels) {
+			continue
+		}
+		for domain := range tas.InternalSeqFrom(psa.TopologyAssignment) {
+			if len(domain.Values) > 0 && domain.Count > 0 {
+				nodesSet.Insert(domain.Values[len(domain.Values)-1])
+			}
+		}
+	}
+	return nodesSet.UnsortedList()
 }
