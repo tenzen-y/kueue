@@ -27,6 +27,7 @@ import (
 
 // +k8s:defaulter-gen=true
 // +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // Configuration is the Schema for the kueueconfigurations API
 type Configuration struct {
