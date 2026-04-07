@@ -733,7 +733,7 @@ func (s *Scheduler) admit(ctx context.Context, e *entry, cq *schdcache.ClusterQu
 
 func (s *Scheduler) prepareWorkload(log logr.Logger, wl *kueue.Workload, cq *schdcache.ClusterQueueSnapshot, admission *kueue.Admission) {
 	workload.SetQuotaReservation(wl, admission, s.clock)
-	if workload.HasAllChecks(wl, workload.AdmissionChecksForWorkload(log, wl, cq.AdmissionChecks, schdcache.AllFlavors(cq.ResourceGroups))) {
+	if workload.HasAllRequiredChecks(log, wl, cq.AdmissionChecks) {
 		// sync Admitted, ignore the result since an API update is always done.
 		_ = workload.SyncAdmittedCondition(wl, s.clock.Now())
 	}
