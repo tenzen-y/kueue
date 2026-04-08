@@ -2735,3 +2735,215 @@ func TestReconcile(t *testing.T) {
 		}
 	}
 }
+
+type notification struct {
+	Cq kueue.ClusterQueueReference
+	Lq kueue.LocalQueueName
+}
+
+type workloadUpdateWatcherMock struct {
+	qManager              *qcache.Manager
+	notificationsRecorded []notification
+	testErrors            []error
+}
+
+func mockWorkloadUpdateWatcher(qManager *qcache.Manager) *workloadUpdateWatcherMock {
+	return &workloadUpdateWatcherMock{
+		qManager:              qManager,
+		notificationsRecorded: []notification{},
+		testErrors:            []error{},
+	}
+}
+
+func (w *workloadUpdateWatcherMock) NotifyWorkloadUpdate(oldWl, newWl *kueue.Workload) {
+	if oldWl == nil && newWl == nil {
+		err := stderrors.New("Both workloads were nil")
+		w.testErrors = append(w.testErrors, err)
+		return
+	}
+
+	if newWl != nil {
+		err := fmt.Errorf("Illegal new workload in delete request: want nil, got %v", newWl)
+		w.testErrors = append(w.testErrors, err)
+		return
+	}
+
+	n := notification{
+		Lq: oldWl.Spec.QueueName,
+	}
+	if oldWl.Status.Admission != nil {
+		n.Cq = oldWl.Status.Admission.ClusterQueue
+	} else if cq, ok := w.qManager.ClusterQueueForWorkload(oldWl); ok {
+		n.Cq = cq
+	}
+
+	w.notificationsRecorded = append(w.notificationsRecorded, n)
+}
+
+func TestReconcileSyncAdmissionChecks(t *testing.T) {
+	cases := map[string]struct {
+		wl         kueue.Workload
+		cq         kueue.ClusterQueue
+		wantChecks []kueue.AdmissionCheckState
+	}{
+		"no checks in cq": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).Obj(),
+		},
+		"add checks from cq": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).AdmissionChecks("ac1", "ac2").Obj(),
+			wantChecks: []kueue.AdmissionCheckState{
+				{
+					Name:  "ac1",
+					State: kueue.CheckStatePending,
+				},
+				{
+					Name:  "ac2",
+					State: kueue.CheckStatePending,
+				},
+			},
+		},
+		"add only checks covering all flavors to unadmitted wl from cq with strategy": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).AdmissionCheckStrategy(
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac1", "flavor1").Obj(),
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac2").Obj(),
+			).Obj(),
+			wantChecks: []kueue.AdmissionCheckState{
+				{
+					Name:  "ac2",
+					State: kueue.CheckStatePending,
+				},
+			},
+		},
+		"add all cq checks to wl with empty assignment": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").Admission(&kueue.Admission{
+				ClusterQueue:      "cq",
+				PodSetAssignments: []kueue.PodSetAssignment{},
+			}).Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).AdmissionCheckStrategy(
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac1", "flavor1").Obj(),
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac2").Obj(),
+			).Obj(),
+			wantChecks: []kueue.AdmissionCheckState{
+				{
+					Name:  "ac1",
+					State: kueue.CheckStatePending,
+				},
+				{
+					Name:  "ac2",
+					State: kueue.CheckStatePending,
+				},
+			},
+		},
+		"add checks to admitted wl from cq with strategy": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").
+				Admission(&kueue.Admission{
+					ClusterQueue: "cq",
+					PodSetAssignments: []kueue.PodSetAssignment{
+						{
+							Name: "p1",
+							Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
+								corev1.ResourceCPU: "flavor1",
+							},
+						},
+					},
+				}).Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).AdmissionCheckStrategy(
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac1", "flavor1").Obj(),
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac2", "flavor2").Obj(),
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac3").Obj(),
+			).Obj(),
+			wantChecks: []kueue.AdmissionCheckState{
+				{
+					Name:  "ac1",
+					State: kueue.CheckStatePending,
+				},
+				{
+					Name:  "ac3",
+					State: kueue.CheckStatePending,
+				},
+			},
+		},
+		"keep only existing valid checks": {
+			wl: *utiltestingapi.MakeWorkload("wl", "ns").
+				AdmissionChecks(
+					kueue.AdmissionCheckState{
+						Name:  "ac1",
+						State: kueue.CheckStateReady,
+					},
+					kueue.AdmissionCheckState{
+						Name:  "ac3",
+						State: kueue.CheckStateReady,
+					},
+				).Obj(),
+			cq: *utiltestingapi.MakeClusterQueue("cq").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("flavor1").Obj(),
+					*utiltestingapi.MakeFlavorQuotas("flavor2").Obj(),
+				).AdmissionCheckStrategy(
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac1").Obj(),
+				*utiltestingapi.MakeAdmissionCheckStrategyRule("ac2").Obj(),
+			).Obj(),
+			wantChecks: []kueue.AdmissionCheckState{
+				{
+					Name:  "ac1",
+					State: kueue.CheckStateReady,
+				},
+				{
+					Name:  "ac2",
+					State: kueue.CheckStatePending,
+				},
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			clientBuilder := utiltesting.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: utiltesting.TreatSSAAsStrategicMerge})
+
+			cl := clientBuilder.Build()
+			recorder := &utiltesting.EventRecorder{}
+			cqCache := schdcache.New(cl)
+			qManager := qcache.NewManagerForUnitTests(cl, cqCache)
+
+			mockWatcher := mockWorkloadUpdateWatcher(qManager)
+
+			reconciler := NewWorkloadReconciler(cl, qManager, cqCache, recorder)
+			reconciler.watchers = []WorkloadUpdateWatcher{mockWatcher}
+
+			ctxWithLogger, _ := utiltesting.ContextWithLog(t)
+			ctx, ctxCancel := context.WithCancel(ctxWithLogger)
+			defer ctxCancel()
+
+			if _, err := reconciler.reconcileSyncAdmissionChecks(ctx, &tc.wl, &tc.cq); err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			if diff := cmp.Diff(tc.wantChecks, tc.wl.Status.AdmissionChecks, cmpopts.IgnoreFields(kueue.AdmissionCheckState{}, "LastTransitionTime")); diff != "" {
+				t.Errorf("Incorrect admission checks (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}

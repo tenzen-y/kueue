@@ -1309,3 +1309,63 @@ func workloadKeys(wls []*kueue.Workload) []client.ObjectKey {
 func uniqueKeys(keys []client.ObjectKey) []client.ObjectKey {
 	return sets.New[client.ObjectKey](keys...).UnsortedList()
 }
+
+// BreakConnection breaks connection to the cluster.
+// Returns a callback to restore the connection.
+func BreakConnection(ctx context.Context, cli client.Client, cluster *kueue.MultiKueueCluster) (restoreConnection func()) {
+	ginkgo.GinkgoHelper()
+
+	var trueLocation string
+	clusterKey := client.ObjectKeyFromObject(cluster)
+
+	ginkgo.By(fmt.Sprintf("breaking the connection to %s", clusterKey), func() {
+		gomega.Eventually(func(g gomega.Gomega) {
+			createdCluster := &kueue.MultiKueueCluster{}
+			g.Expect(cli.Get(ctx, clusterKey, createdCluster)).To(gomega.Succeed())
+			trueLocation = createdCluster.Spec.ClusterSource.KubeConfig.Location
+			createdCluster.Spec.ClusterSource.KubeConfig.Location = "bad-secret"
+			g.Expect(cli.Update(ctx, createdCluster)).To(gomega.Succeed())
+		}, Timeout, Interval).Should(gomega.Succeed())
+
+		gomega.Eventually(func(g gomega.Gomega) {
+			createdCluster := &kueue.MultiKueueCluster{}
+			g.Expect(cli.Get(ctx, clusterKey, createdCluster)).To(gomega.Succeed())
+			activeCondition := apimeta.FindStatusCondition(createdCluster.Status.Conditions, kueue.MultiKueueClusterActive)
+			g.Expect(activeCondition).To(gomega.BeComparableTo(&metav1.Condition{
+				Type:   kueue.MultiKueueClusterActive,
+				Status: metav1.ConditionFalse,
+				Reason: "BadKubeConfig",
+			}, IgnoreConditionMessage, IgnoreConditionTimestampsAndObservedGeneration))
+		}, Timeout, Interval).Should(gomega.Succeed())
+	})
+
+	return createConnectionRestoringCallback(ctx, cli, cluster, trueLocation)
+}
+
+func createConnectionRestoringCallback(ctx context.Context, cli client.Client, cluster *kueue.MultiKueueCluster, location string) func() {
+	return func() {
+		ginkgo.GinkgoHelper()
+
+		clusterKey := client.ObjectKeyFromObject(cluster)
+
+		ginkgo.By(fmt.Sprintf("restoring the connection to %s", clusterKey), func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				createdCluster := &kueue.MultiKueueCluster{}
+				g.Expect(cli.Get(ctx, clusterKey, createdCluster)).To(gomega.Succeed())
+				createdCluster.Spec.ClusterSource.KubeConfig.Location = location
+				g.Expect(cli.Update(ctx, createdCluster)).To(gomega.Succeed())
+			}, Timeout, Interval).Should(gomega.Succeed())
+
+			gomega.Eventually(func(g gomega.Gomega) {
+				createdCluster := &kueue.MultiKueueCluster{}
+				g.Expect(cli.Get(ctx, clusterKey, createdCluster)).To(gomega.Succeed())
+				activeCondition := apimeta.FindStatusCondition(createdCluster.Status.Conditions, kueue.MultiKueueClusterActive)
+				g.Expect(activeCondition).To(gomega.BeComparableTo(&metav1.Condition{
+					Type:   kueue.MultiKueueClusterActive,
+					Status: metav1.ConditionTrue,
+					Reason: "Active",
+				}, IgnoreConditionMessage, IgnoreConditionTimestampsAndObservedGeneration))
+			}, Timeout, Interval).Should(gomega.Succeed())
+		})
+	}
+}
