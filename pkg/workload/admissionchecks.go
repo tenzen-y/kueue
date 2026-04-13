@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/wait"
 )
 
+type AdmissionChecks = map[kueue.AdmissionCheckReference]sets.Set[kueue.ResourceFlavorReference]
+
 // SyncAdmittedCondition sync the state of the Admitted condition based on the
 // state of QuotaReserved, AdmissionChecks and DelayedTopologyRequests.
 // Return true if any change was done.
@@ -162,7 +164,7 @@ func HasAllChecksReady(wl *kueue.Workload) bool {
 // HasAllRequiredChecks returns true if all the relevant checks are present in the workload.
 // (They don't have to be in the Ready state; for that, see HasAllChecksReady).
 // The workload is expected to have an admission.
-func HasAllRequiredChecks(log logr.Logger, wl *kueue.Workload, allChecks map[kueue.AdmissionCheckReference]sets.Set[kueue.ResourceFlavorReference]) bool {
+func HasAllRequiredChecks(log logr.Logger, wl *kueue.Workload, allChecks AdmissionChecks) bool {
 	mustHaveChecks := admissionChecksForAdmission(log, allChecks, *wl.Status.Admission)
 
 	if mustHaveChecks.Len() == 0 {
