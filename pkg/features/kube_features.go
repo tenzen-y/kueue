@@ -299,6 +299,13 @@ const (
 	// ShortWorkloadNames ensures that generated Workload names do not exceed
 	// 63 characters, making them compatible with Kubernetes label value limits.
 	ShortWorkloadNames featuregate.Feature = "ShortWorkloadNames"
+
+	// owner: @ShaanveerS
+	//
+	// issue: https://github.com/kubernetes-sigs/kueue/issues/7259
+	// Enables rejecting updates to ClusterQueues with invalid
+	// AdmissionCheckStrategy.OnFlavors references.
+	RejectUpdatesToCQWithInvalidOnFlavors featuregate.Feature = "RejectUpdatesToCQWithInvalidOnFlavors"
 )
 
 func init() {
@@ -458,6 +465,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	ShortWorkloadNames: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	RejectUpdatesToCQWithInvalidOnFlavors: {
+		{Version: version.MustParse("0.16"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }
 
