@@ -3063,3 +3063,131 @@ func TestIsExplicitlyRequestingTAS(t *testing.T) {
 		})
 	}
 }
+
+func TestCalcFSUsageFromResourcesWithDRA(t *testing.T) {
+	tests := map[string]struct {
+		consumed   corev1.ResourceList
+		penalty    corev1.ResourceList
+		lqWeight   float64
+		resWeights map[corev1.ResourceName]float64
+		wantUsage  float64
+	}{
+		"DRA resource with default weight": {
+			consumed: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("2"),
+			},
+			penalty:    corev1.ResourceList{},
+			lqWeight:   1,
+			resWeights: map[corev1.ResourceName]float64{},
+			wantUsage:  2, // default weight is 1, so 1 * 2 / 1 = 2
+		},
+		"DRA resource with explicit weight": {
+			consumed: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("2"),
+			},
+			penalty:  corev1.ResourceList{},
+			lqWeight: 1,
+			resWeights: map[corev1.ResourceName]float64{
+				"gpu-logical": 3.0,
+			},
+			wantUsage: 6, // 3 * 2 / 1 = 6
+		},
+		"mixed CPU and DRA resources": {
+			consumed: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("4"),
+				"gpu-logical":      resource.MustParse("2"),
+			},
+			penalty:  corev1.ResourceList{},
+			lqWeight: 1,
+			resWeights: map[corev1.ResourceName]float64{
+				corev1.ResourceCPU: 1.0,
+				"gpu-logical":      5.0,
+			},
+			wantUsage: 14, // (1*4 + 5*2) / 1 = 14
+		},
+		"DRA resource with weight zero contributes nothing": {
+			consumed: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("10"),
+			},
+			penalty:  corev1.ResourceList{},
+			lqWeight: 1,
+			resWeights: map[corev1.ResourceName]float64{
+				"gpu-logical": 0,
+			},
+			wantUsage: 0,
+		},
+		"DRA resource in penalty only": {
+			consumed: corev1.ResourceList{},
+			penalty: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("3"),
+			},
+			lqWeight:   1,
+			resWeights: map[corev1.ResourceName]float64{},
+			wantUsage:  3, // default weight 1, 1 * 3 / 1 = 3
+		},
+		"DRA resource in both consumed and penalty": {
+			consumed: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("2"),
+			},
+			penalty: corev1.ResourceList{
+				"gpu-logical": resource.MustParse("1"),
+			},
+			lqWeight: 2,
+			resWeights: map[corev1.ResourceName]float64{
+				"gpu-logical": 4.0,
+			},
+			wantUsage: 6, // 4 * (2+1) / 2 = 6
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := CalcFSUsageFromResources(tc.consumed, tc.penalty, tc.lqWeight, tc.resWeights)
+			if got != tc.wantUsage {
+				t.Errorf("CalcFSUsageFromResources() = %v, want %v", got, tc.wantUsage)
+			}
+		})
+	}
+}
+
+func TestSumTotalRequestsWithDRAFromAdmission(t *testing.T) {
+	fakeClock := testingclock.NewFakeClock(time.Now())
+	now := fakeClock.Now()
+	wl := utiltestingapi.MakeWorkload("test-wl", "default").
+		PodSets(*utiltestingapi.MakePodSet("main", 1).
+			Request(corev1.ResourceCPU, "1").
+			Obj()).
+		ReserveQuotaAt(
+			utiltestingapi.MakeAdmission("cq").
+				PodSets(
+					utiltestingapi.MakePodSetAssignment("main").
+						Flavor(corev1.ResourceCPU, "default").
+						ResourceUsage(corev1.ResourceCPU, "1000m").
+						Flavor("gpu-logical", "gpu-flavor").
+						ResourceUsage("gpu-logical", "2").
+						Count(1).
+						Obj(),
+				).Obj(), now,
+		).Obj()
+
+	info := NewInfo(wl)
+	sumReqs := info.SumTotalRequests()
+
+	// Verify CPU is present
+	cpuVal, hasCPU := sumReqs[corev1.ResourceCPU]
+	if !hasCPU {
+		t.Fatal("SumTotalRequests should include cpu")
+	}
+	if cpuVal.Cmp(resource.MustParse("1")) != 0 {
+		t.Errorf("cpu = %v, want 1", cpuVal)
+	}
+
+	// Verify DRA logical resource is present from admission
+	gpuVal, hasGPU := sumReqs["gpu-logical"]
+	if !hasGPU {
+		t.Fatal("SumTotalRequests should include DRA logical resource 'gpu-logical' from admission")
+	}
+	if gpuVal.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("gpu-logical = %v, want 2", gpuVal)
+	}
+}
