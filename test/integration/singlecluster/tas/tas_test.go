@@ -522,6 +522,58 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 		})
 	})
 
+	ginkgo.When("Workload without admission has pods with node selector", func() {
+		var (
+			node *corev1.Node
+			wl   *kueue.Workload
+			pod  *corev1.Pod
+		)
+
+		ginkgo.BeforeEach(func() {
+			node = testingnode.MakeNode("node-test").
+				Ready().
+				Obj()
+			util.CreateNodesWithStatus(ctx, k8sClient, []corev1.Node{*node})
+
+			wl = utiltestingapi.MakeWorkload("wl-pending", ns.Name).
+				Request(corev1.ResourceCPU, "1").
+				Obj()
+			util.MustCreate(ctx, k8sClient, wl)
+
+			pod = testingpod.MakePod("pod-with-selector", ns.Name).
+				Annotation(kueue.WorkloadAnnotation, wl.Name).
+				Annotation(kueue.PodSetUnconstrainedTopologyAnnotation, "true").
+				NodeSelector(corev1.LabelHostname, "node-test").
+				StatusPhase(corev1.PodPending).
+				Obj()
+			util.MustCreate(ctx, k8sClient, pod)
+		})
+
+		ginkgo.AfterEach(func() {
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, pod, true)
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, wl, true)
+			util.ExpectObjectToBeDeleted(ctx, k8sClient, node, true)
+		})
+
+		ginkgo.It("should mark stray pods as failed during node reconciliation", func() {
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), node)).To(gomega.Succeed())
+				node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{
+					Key:    "trigger-reconcile",
+					Value:  "true",
+					Effect: corev1.TaintEffectNoSchedule,
+				})
+				g.Expect(k8sClient.Update(ctx, node)).To(gomega.Succeed())
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+			gomega.Eventually(func(g gomega.Gomega) {
+				var fetchedPod corev1.Pod
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), &fetchedPod)).To(gomega.Succeed())
+				g.Expect(fetchedPod.Status.Phase).To(gomega.Equal(corev1.PodFailed))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+		})
+	})
+
 	ginkgo.When("Single TAS Resource Flavor", func() {
 		var (
 			tasFlavor    *kueue.ResourceFlavor
