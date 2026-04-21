@@ -37,6 +37,10 @@ export E2E_ENFORCE_OPERATOR_UPDATE="${E2E_ENFORCE_OPERATOR_UPDATE:-false}"
 # When set to value "true", skip Kueue re-install in E2E_MODE=dev if the controller deployment already exists.
 export E2E_SKIP_REINSTALL="${E2E_SKIP_REINSTALL:-false}"
 
+# When set to a truthy value with E2E_MODE=dev, skip docker pull and kind image import for dependency images
+# when they already exist locally / on kind worker nodes. CI mode always pulls and loads.
+export E2E_SKIP_IMAGE_RELOAD="${E2E_SKIP_IMAGE_RELOAD:-false}"
+
 export KIND_VERSION="${E2E_KIND_VERSION/"kindest/node:v"/}"
 
 function e2e_is_truthy {
@@ -44,6 +48,16 @@ function e2e_is_truthy {
         1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+# $1 image reference
+function e2e_docker_pull_if_needed {
+    local image="$1"
+    if [[ "${E2E_MODE}" == "dev" ]] && ! e2e_is_truthy "${E2E_SKIP_IMAGE_RELOAD:-}" && docker image inspect "$image" > /dev/null 2>&1; then
+        echo "Image '$image' already cached locally; skipping pull (E2E_MODE=dev, E2E_SKIP_IMAGE_RELOAD=true)"
+        return 0
+    fi
+    docker pull "$image"
 }
 
 function e2e_deployment_exists {
@@ -365,8 +379,8 @@ function cluster_create {
 }
 
 function prepare_docker_images {
-    docker pull "$E2E_TEST_AGNHOST_IMAGE_OLD_WITH_SHA"
-    docker pull "$E2E_TEST_AGNHOST_IMAGE_WITH_SHA"
+    e2e_docker_pull_if_needed "$E2E_TEST_AGNHOST_IMAGE_OLD_WITH_SHA"
+    e2e_docker_pull_if_needed "$E2E_TEST_AGNHOST_IMAGE_WITH_SHA"
 
     # We can load image by a digest but we cannot reference it by the digest that we pulled.
     # For more information https://github.com/kubernetes-sigs/kind/issues/2394#issuecomment-888713831.
@@ -384,49 +398,57 @@ function prepare_docker_images {
     fi
 
     if [[ -n ${APPWRAPPER_VERSION:-} && ("$GINKGO_ARGS" =~ feature:(appwrapper|managejobswithoutqueuename) || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${APPWRAPPER_IMAGE}"
+        e2e_docker_pull_if_needed "${APPWRAPPER_IMAGE}"
     fi
     if [[ -n ${JOBSET_VERSION:-} && ("$GINKGO_ARGS" =~ feature:(jobset|tas|trainjob|managejobswithoutqueuename) || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${JOBSET_IMAGE}"
+        e2e_docker_pull_if_needed "${JOBSET_IMAGE}"
     fi
     if [[ -n ${KUBEFLOW_VERSION:-} && ("$GINKGO_ARGS" =~ feature:(jaxjob|pytorchjob) || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${KUBEFLOW_IMAGE}"
+        e2e_docker_pull_if_needed "${KUBEFLOW_IMAGE}"
     fi
     if [[ -n ${KUBEFLOW_TRAINER_VERSION:-} && ("$GINKGO_ARGS" =~ feature:(tas|trainjob) || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${KF_TRAINER_IMAGE}"
+        e2e_docker_pull_if_needed "${KF_TRAINER_IMAGE}"
     fi
 
     if [[ -n ${KUBEFLOW_MPI_VERSION:-} ]]; then
-        docker pull "${KUBEFLOW_MPI_IMAGE}"
+        e2e_docker_pull_if_needed "${KUBEFLOW_MPI_IMAGE}"
     fi
     if [[ -n ${KUBERAY_VERSION:-} && ("$GINKGO_ARGS" =~ feature:kuberay || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${KUBERAY_IMAGE}"
+        e2e_docker_pull_if_needed "${KUBERAY_IMAGE}"
         determine_kuberay_ray_image
         if [[ ${USE_RAY_FOR_TESTS:-} == "ray" ]]; then
-            docker pull "${KUBERAY_RAY_IMAGE}"
+            e2e_docker_pull_if_needed "${KUBERAY_RAY_IMAGE}"
         fi
     fi
     if [[ -n ${LEADERWORKERSET_VERSION:-} && ("$GINKGO_ARGS" =~ feature:(leaderworkerset|managejobswithoutqueuename) || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${LEADERWORKERSET_IMAGE}"
+        e2e_docker_pull_if_needed "${LEADERWORKERSET_IMAGE}"
     fi
     if [[ -n ${KUEUE_UPGRADE_FROM_VERSION:-} ]]; then
-        docker pull "${KUEUE_OLD_VERSION_IMAGE}"
+        e2e_docker_pull_if_needed "${KUEUE_OLD_VERSION_IMAGE}"
     fi
     if [[ -n ${SPARKOPERATOR_VERSION:-} && ("$GINKGO_ARGS" =~ feature:spark || ! "$GINKGO_ARGS" =~ "--label-filter") ]]; then
-        docker pull "${SPARKOPERATOR_IMAGE}"
+        e2e_docker_pull_if_needed "${SPARKOPERATOR_IMAGE}"
     fi
 }
 
 # $1 cluster
 function cluster_kind_load {
-    cluster_kind_load_image "$1" "${E2E_TEST_AGNHOST_IMAGE_OLD}"
-    cluster_kind_load_image "$1" "${E2E_TEST_AGNHOST_IMAGE}"
-    cluster_kind_load_image "$1" "$IMAGE_TAG"
+    local cluster="$1"
+    cluster_kind_load_image "$cluster" "${E2E_TEST_AGNHOST_IMAGE_OLD}"
+    cluster_kind_load_image "$cluster" "${E2E_TEST_AGNHOST_IMAGE}"
+
+    if [[ "${E2E_MODE}" == "dev" ]] && ! e2e_is_truthy "${E2E_SKIP_REINSTALL:-}"; then
+        cluster_kind_load_image "$cluster" "$IMAGE_TAG"
+    else
+        # Bypass dev-mode existence check: Kueue image may have been rebuilt locally with the same tag; always re-import unless skipping reinstall.
+        cluster_kind_load_image_impl "$cluster" "$IMAGE_TAG"
+    fi
+
     if [[ -n ${KUEUE_UPGRADE_FROM_VERSION:-} ]]; then
-        cluster_kind_load_image "$1" "${KUEUE_OLD_VERSION_IMAGE}"
+        cluster_kind_load_image "$cluster" "${KUEUE_OLD_VERSION_IMAGE}"
     fi
     if [[ -n "${CLUSTERPROFILE_VERSION:-}" ]]; then
-        cluster_kind_load_image "$1" "${CLUSTERPROFILE_PLUGIN_IMAGE}"
+        cluster_kind_load_image "$cluster" "${CLUSTERPROFILE_PLUGIN_IMAGE}"
     fi
 }
 
@@ -481,17 +503,31 @@ function kind_load {
     fi
 }
 
+# $1 cluster name
+# $2 image reference (must match how the image appears in ctr images ls -q on workers)
+function cluster_kind_image_exists {
+    local cluster="$1"
+    local image="$2"
+    local first_worker
+    first_worker=$($KIND get nodes --name "$cluster" | grep -v 'control-plane' | head -1)
+    [[ -n "$first_worker" ]] && \
+        docker exec "$first_worker" ctr --namespace=k8s.io images ls -q 2>/dev/null | grep -qF "$image"
+}
+
 # Save image to a temp file once, then load into all worker nodes in parallel.
 # Using docker save + ctr import directly to avoid the --all-platforms
 # issue with multi-arch images in DinD environments.
 # See: https://github.com/kubernetes-sigs/kind/issues/3795
 # $1 cluster
 # $2 image
-function cluster_kind_load_image {
+function cluster_kind_load_image_impl {
+    local cluster="$1"
+    local image="$2"
     # filter out 'control-plane' node, use only worker nodes to load image
-    worker_nodes=$($KIND get nodes --name "$1" | grep -v 'control-plane')
+    local worker_nodes
+    worker_nodes=$($KIND get nodes --name "$cluster" | grep -v 'control-plane')
     if [[ -z "$worker_nodes" ]]; then
-        echo "No worker nodes found for cluster '$1'"
+        echo "No worker nodes found for cluster '$cluster'"
         return 1
     fi
 
@@ -500,13 +536,13 @@ function cluster_kind_load_image {
     trap '[ -d "${tmp_dir:-}" ] && rm -rf "$tmp_dir"' RETURN
     local tmp_image="$tmp_dir/image.tar"
 
-    echo "Saving image '$2'..."
-    if ! docker save "$2" -o "$tmp_image"; then
-        echo "Failed to save image '$2'"
+    echo "Saving image '${image}'..."
+    if ! docker save "$image" -o "$tmp_image"; then
+        echo "Failed to save image '${image}'"
         return 1
     fi
 
-    echo "Loading image '$2' to cluster '$1' (parallel)"
+    echo "Loading image '${image}' to cluster '${cluster}' (parallel)"
     local pids=()
     local nodes=()
     while IFS= read -r node; do
@@ -520,11 +556,21 @@ function cluster_kind_load_image {
     local failed=0
     for i in "${!pids[@]}"; do
         if ! wait "${pids[$i]}"; then
-            echo "Failed to load image '$2' to node '${nodes[$i]}'"
+            echo "Failed to load image '${image}' to node '${nodes[$i]}'"
             failed=1
         fi
     done
     return "$failed"
+}
+
+function cluster_kind_load_image {
+    local cluster="$1"
+    local image="$2"
+    if [[ "${E2E_MODE}" == "dev" ]] && ! e2e_is_truthy "${E2E_SKIP_IMAGE_RELOAD:-}" && cluster_kind_image_exists "$cluster" "$image"; then
+        echo "Image '$image' already loaded in cluster '$cluster'; skipping (E2E_MODE=dev, E2E_SKIP_IMAGE_RELOAD=true)"
+        return 0
+    fi
+    cluster_kind_load_image_impl "$cluster" "$image"
 }
 
 # $1 kubeconfig
@@ -569,7 +615,7 @@ function cluster_kueue_deploy {
         return
     fi
 
-    if [[ "${E2E_MODE}" == "dev" && "${E2E_SKIP_REINSTALL}" == "true" ]]; then
+    if [[ "${E2E_MODE}" == "dev" ]] && ! e2e_is_truthy "${E2E_SKIP_REINSTALL:-}"; then
         if e2e_deployment_exists "$1" "${KUEUE_NAMESPACE}" "${KUEUE_DEPLOYMENT_NAME}"; then
             echo "Kueue controller already exists in namespace '${KUEUE_NAMESPACE}', skipping reinstall"
             return
@@ -934,7 +980,7 @@ function install_sparkoperator {
 
     ${HELM} repo add --force-update spark-operator https://kubeflow.github.io/spark-operator
 
-    if [[ "${E2E_MODE}" == "dev" ]] && e2e_is_truthy "${E2E_ENFORCE_OPERATOR_UPDATE}" ; then
+    if [[ "${E2E_MODE}" == "dev" ]] && e2e_is_truthy "${E2E_ENFORCE_OPERATOR_UPDATE}"; then
         if helm list --namespace "${ns}" | grep -q "${helm_release_name}"; then
             local installed_version=""
             installed_version=$(helm get values --namespace="${ns}" "${helm_release_name}" -o json | jq -r '.image.tag')
