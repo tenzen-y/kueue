@@ -4480,6 +4480,219 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 				})
 			})
 		})
+
+		// Reproducer: CQ has two flavors sharing the same physical nodes. "partial-reserved" requires
+		// an extra NodeTaint only the pending workload tolerates. When the "ondemand" flavor and its
+		// node x1 are fully consumed by prior workloads, the pending workload must land on the free
+		// node x2 under the "partial-reserved" flavor.
+		ginkgo.When("partial-reserved flavor shares nodes with ondemand flavor and ondemand is full", func() {
+			var (
+				partialReservedFlavor *kueue.ResourceFlavor
+				ondemandFlavor        *kueue.ResourceFlavor
+				topology              *kueue.Topology
+				localQueue            *kueue.LocalQueue
+				clusterQueue          *kueue.ClusterQueue
+				nodes                 []corev1.Node
+			)
+
+			ginkgo.BeforeEach(func() {
+				nodes = []corev1.Node{
+					*testingnode.MakeNode("x1").
+						Label("example.com/machine", "standard").
+						Label(corev1.LabelHostname, "x1").
+						StatusAllocatable(corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("400m"),
+							corev1.ResourceMemory: resource.MustParse("400Mi"),
+							corev1.ResourcePods:   resource.MustParse("10"),
+						}).
+						Taints(corev1.Taint{
+							Key:    "example.com/machine",
+							Value:  "standard",
+							Effect: corev1.TaintEffectNoSchedule,
+						}).
+						Ready().
+						Obj(),
+					*testingnode.MakeNode("x2").
+						Label("example.com/machine", "standard").
+						Label(corev1.LabelHostname, "x2").
+						StatusAllocatable(corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("400m"),
+							corev1.ResourceMemory: resource.MustParse("400Mi"),
+							corev1.ResourcePods:   resource.MustParse("10"),
+						}).
+						Taints(corev1.Taint{
+							Key:    "example.com/machine",
+							Value:  "standard",
+							Effect: corev1.TaintEffectNoSchedule,
+						}).
+						Ready().
+						Obj(),
+				}
+				util.CreateNodesWithStatus(ctx, k8sClient, nodes)
+
+				topology = utiltestingapi.MakeTopology("flat").Levels(
+					"example.com/machine",
+					corev1.LabelHostname,
+				).Obj()
+				util.MustCreate(ctx, k8sClient, topology)
+
+				partialReservedFlavor = utiltestingapi.MakeResourceFlavor("partial-reserved").
+					NodeLabel("example.com/machine", "standard").
+					Taint(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					Taint(corev1.Taint{
+						Key:    "example.com/instance-type",
+						Value:  "partial-reserved",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					TopologyName("flat").
+					Obj()
+				util.MustCreate(ctx, k8sClient, partialReservedFlavor)
+
+				ondemandFlavor = utiltestingapi.MakeResourceFlavor("ondemand").
+					NodeLabel("example.com/machine", "standard").
+					Taint(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					TopologyName("flat").
+					Obj()
+				util.MustCreate(ctx, k8sClient, ondemandFlavor)
+
+				clusterQueue = utiltestingapi.MakeClusterQueue("global").
+					ResourceGroup(
+						*utiltestingapi.MakeFlavorQuotas(partialReservedFlavor.Name).
+							Resource(corev1.ResourceCPU, "100m").
+							Resource(corev1.ResourceMemory, "100Mi").Obj(),
+						*utiltestingapi.MakeFlavorQuotas(ondemandFlavor.Name).
+							Resource(corev1.ResourceCPU, "400m").
+							Resource(corev1.ResourceMemory, "400Mi").Obj(),
+					).
+					Preemption(kueue.ClusterQueuePreemption{
+						ReclaimWithinCohort: kueue.PreemptionPolicyNever,
+					}).
+					Obj()
+				util.MustCreate(ctx, k8sClient, clusterQueue)
+
+				localQueue = utiltestingapi.MakeLocalQueue("global-queue", ns.Name).ClusterQueue(clusterQueue.Name).Obj()
+				util.MustCreate(ctx, k8sClient, localQueue)
+			})
+
+			ginkgo.AfterEach(func() {
+				gomega.Expect(util.DeleteAllPodsInNamespace(ctx, k8sClient, ns)).Should(gomega.Succeed())
+				gomega.Expect(util.DeleteWorkloadsInNamespace(ctx, k8sClient, ns)).Should(gomega.Succeed())
+				gomega.Expect(util.DeleteObject(ctx, k8sClient, localQueue)).Should(gomega.Succeed())
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, clusterQueue, true)
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, partialReservedFlavor, true)
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, ondemandFlavor, true)
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, topology, true)
+				for _, node := range nodes {
+					util.ExpectObjectToBeDeleted(ctx, k8sClient, &node, true)
+				}
+			})
+
+			ginkgo.It("should admit the pending workload to partial-reserved flavor on the free node", func() {
+				machineToleration := corev1.Toleration{
+					Key:      "example.com/machine",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "standard",
+					Effect:   corev1.TaintEffectNoSchedule,
+				}
+				partialReservedToleration := corev1.Toleration{
+					Key:      "example.com/instance-type",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "partial-reserved",
+					Effect:   corev1.TaintEffectNoSchedule,
+				}
+
+				var (
+					ondemandWl1 *kueue.Workload
+					ondemandWl2 *kueue.Workload
+					pendingWl   *kueue.Workload
+				)
+
+				ginkgo.By("creating the first ondemand workload pinned to x1", func() {
+					ondemandWl1 = utiltestingapi.MakeWorkload("ondemand-wl1", ns.Name).
+						Queue(kueue.LocalQueueName(localQueue.Name)).
+						PodSets(*utiltestingapi.MakePodSet("one", 1).
+							NodeSelector(map[string]string{corev1.LabelHostname: "x1"}).
+							PreferredTopologyRequest(corev1.LabelHostname).
+							Request(corev1.ResourceCPU, "200m").
+							Request(corev1.ResourceMemory, "200Mi").
+							Toleration(machineToleration).
+							Obj()).Obj()
+					util.MustCreate(ctx, k8sClient, ondemandWl1)
+					util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, ondemandWl1)
+					createPodsForWorkload(ondemandWl1, ns.Name, false, true)
+				})
+
+				ginkgo.By("creating the second ondemand workload pinned to x1", func() {
+					ondemandWl2 = utiltestingapi.MakeWorkload("ondemand-wl2", ns.Name).
+						Queue(kueue.LocalQueueName(localQueue.Name)).
+						PodSets(*utiltestingapi.MakePodSet("one", 1).
+							NodeSelector(map[string]string{corev1.LabelHostname: "x1"}).
+							PreferredTopologyRequest(corev1.LabelHostname).
+							Request(corev1.ResourceCPU, "200m").
+							Request(corev1.ResourceMemory, "200Mi").
+							Toleration(machineToleration).
+							Obj()).Obj()
+					util.MustCreate(ctx, k8sClient, ondemandWl2)
+					util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, ondemandWl2)
+					createPodsForWorkload(ondemandWl2, ns.Name, false, true)
+				})
+
+				ginkgo.By("verifying both ondemand workloads consumed the ondemand flavor and share node x1", func() {
+					gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ondemandWl1), ondemandWl1)).To(gomega.Succeed())
+					gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ondemandWl2), ondemandWl2)).To(gomega.Succeed())
+					for _, wl := range []*kueue.Workload{ondemandWl1, ondemandWl2} {
+						gomega.Expect(wl.Status.Admission.PodSetAssignments[0].Flavors[corev1.ResourceCPU]).To(
+							gomega.Equal(kueue.ResourceFlavorReference("ondemand")))
+						gomega.Expect(wl.Status.Admission.PodSetAssignments[0].Flavors[corev1.ResourceMemory]).To(
+							gomega.Equal(kueue.ResourceFlavorReference("ondemand")))
+						ta := utiltas.InternalFrom(wl.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+						gomega.Expect(ta.Domains).To(gomega.HaveLen(1))
+						gomega.Expect(ta.Domains[0].Values).To(gomega.Equal([]string{"x1"}))
+					}
+				})
+
+				ginkgo.By("creating the pending workload that tolerates both taints", func() {
+					pendingWl = utiltestingapi.MakeWorkload("partial-reserved-pending", ns.Name).
+						Queue(kueue.LocalQueueName(localQueue.Name)).
+						PodSets(*utiltestingapi.MakePodSet("one", 1).
+							PreferredTopologyRequest(corev1.LabelHostname).
+							Request(corev1.ResourceCPU, "100m").
+							Request(corev1.ResourceMemory, "100Mi").
+							Toleration(machineToleration).
+							Toleration(partialReservedToleration).
+							Obj()).Obj()
+					util.MustCreate(ctx, k8sClient, pendingWl)
+				})
+
+				ginkgo.By("verifying the pending workload is admitted to partial-reserved flavor on the free node x2", func() {
+					util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, pendingWl)
+					gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pendingWl), pendingWl)).To(gomega.Succeed())
+					gomega.Expect(pendingWl.Status.Admission.PodSetAssignments[0].Flavors[corev1.ResourceCPU]).To(
+						gomega.Equal(kueue.ResourceFlavorReference("partial-reserved")))
+					gomega.Expect(pendingWl.Status.Admission.PodSetAssignments[0].Flavors[corev1.ResourceMemory]).To(
+						gomega.Equal(kueue.ResourceFlavorReference("partial-reserved")))
+					gomega.Expect(pendingWl.Status.Admission.PodSetAssignments[0].TopologyAssignment).Should(gomega.BeComparableTo(
+						utiltas.V1Beta2From(&utiltas.TopologyAssignment{
+							Levels: []string{corev1.LabelHostname},
+							Domains: []utiltas.TopologyDomainAssignment{
+								{
+									Count:  1,
+									Values: []string{"x2"},
+								},
+							},
+						}),
+					))
+				})
+			})
+		})
 	})
 
 	// The purpose of this test is to demonstrate a TAS use case

@@ -2388,6 +2388,185 @@ func TestScheduleForTAS(t *testing.T) {
 				utiltesting.MakeEventRecord("default", "foo", "Admitted", corev1.EventTypeNormal).Obj(),
 			},
 		},
+		// partial-reserved and ondemand flavors both match standard nodes via NodeLabels. partial-reserved
+		// additionally requires tolerating example.com/instance-type=partial-reserved via its NodeTaints.
+		// Two already-admitted ondemand workloads have filled x1 (and the ondemand quota); the pending
+		// workload tolerates both taints and must take partial-reserved on the free node x2.
+		"workload with partial-reserved toleration gets partial-reserved flavor on free node when ondemand nodes are full": {
+			nodes: []corev1.Node{
+				*testingnode.MakeNode("x1").
+					Label("example.com/machine", "standard").
+					Label(corev1.LabelHostname, "x1").
+					StatusAllocatable(corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("400m"),
+						corev1.ResourceMemory: resource.MustParse("400Mi"),
+						corev1.ResourcePods:   resource.MustParse("10"),
+					}).
+					Taints(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					Ready().
+					Obj(),
+				*testingnode.MakeNode("x2").
+					Label("example.com/machine", "standard").
+					Label(corev1.LabelHostname, "x2").
+					StatusAllocatable(corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("400m"),
+						corev1.ResourceMemory: resource.MustParse("400Mi"),
+						corev1.ResourcePods:   resource.MustParse("10"),
+					}).
+					Taints(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					Ready().
+					Obj(),
+			},
+			topologies: []kueue.Topology{
+				*utiltestingapi.MakeTopology("flat").
+					Levels("example.com/machine", corev1.LabelHostname).
+					Obj(),
+			},
+			resourceFlavors: []kueue.ResourceFlavor{
+				*utiltestingapi.MakeResourceFlavor("partial-reserved").
+					NodeLabel("example.com/machine", "standard").
+					Taint(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					Taint(corev1.Taint{
+						Key:    "example.com/instance-type",
+						Value:  "partial-reserved",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					TopologyName("flat").
+					Obj(),
+				*utiltestingapi.MakeResourceFlavor("ondemand").
+					NodeLabel("example.com/machine", "standard").
+					Taint(corev1.Taint{
+						Key:    "example.com/machine",
+						Value:  "standard",
+						Effect: corev1.TaintEffectNoSchedule,
+					}).
+					TopologyName("flat").
+					Obj(),
+			},
+			clusterQueues: []kueue.ClusterQueue{
+				*utiltestingapi.MakeClusterQueue("tas-main").
+					ResourceGroup(
+						*utiltestingapi.MakeFlavorQuotas("partial-reserved").
+							Resource(corev1.ResourceCPU, "100m").
+							Resource(corev1.ResourceMemory, "100Mi").Obj(),
+						*utiltestingapi.MakeFlavorQuotas("ondemand").
+							Resource(corev1.ResourceCPU, "400m").
+							Resource(corev1.ResourceMemory, "400Mi").Obj(),
+					).
+					Preemption(kueue.ClusterQueuePreemption{
+						ReclaimWithinCohort: kueue.PreemptionPolicyNever,
+					}).
+					Obj(),
+			},
+			workloads: []kueue.Workload{
+				*utiltestingapi.MakeWorkload("ondemand-admitted-a", "default").
+					Queue("tas-main").
+					PodSets(*utiltestingapi.MakePodSet("one", 1).
+						PreferredTopologyRequest(corev1.LabelHostname).
+						Request(corev1.ResourceCPU, "200m").
+						Request(corev1.ResourceMemory, "200Mi").
+						Toleration(corev1.Toleration{
+							Key:      "example.com/machine",
+							Operator: corev1.TolerationOpEqual,
+							Value:    "standard",
+							Effect:   corev1.TaintEffectNoSchedule,
+						}).
+						Obj()).
+					ReserveQuotaAt(
+						utiltestingapi.MakeAdmission("tas-main").
+							PodSets(utiltestingapi.MakePodSetAssignment("one").
+								Assignment(corev1.ResourceCPU, "ondemand", "200m").
+								Assignment(corev1.ResourceMemory, "ondemand", "200Mi").
+								Count(1).
+								TopologyAssignment(utiltestingapi.MakeTopologyAssignment(
+									[]string{corev1.LabelHostname}).
+									Domain(utiltestingapi.MakeTopologyDomainAssignment([]string{"x1"}, 1).Obj()).
+									Obj()).
+								Obj()).
+							Obj(), now,
+					).
+					AdmittedAt(true, now).
+					Obj(),
+				*utiltestingapi.MakeWorkload("ondemand-admitted-b", "default").
+					Queue("tas-main").
+					PodSets(*utiltestingapi.MakePodSet("one", 1).
+						PreferredTopologyRequest(corev1.LabelHostname).
+						Request(corev1.ResourceCPU, "200m").
+						Request(corev1.ResourceMemory, "200Mi").
+						Toleration(corev1.Toleration{
+							Key:      "example.com/machine",
+							Operator: corev1.TolerationOpEqual,
+							Value:    "standard",
+							Effect:   corev1.TaintEffectNoSchedule,
+						}).
+						Obj()).
+					ReserveQuotaAt(
+						utiltestingapi.MakeAdmission("tas-main").
+							PodSets(utiltestingapi.MakePodSetAssignment("one").
+								Assignment(corev1.ResourceCPU, "ondemand", "200m").
+								Assignment(corev1.ResourceMemory, "ondemand", "200Mi").
+								Count(1).
+								TopologyAssignment(utiltestingapi.MakeTopologyAssignment(
+									[]string{corev1.LabelHostname}).
+									Domain(utiltestingapi.MakeTopologyDomainAssignment([]string{"x1"}, 1).Obj()).
+									Obj()).
+								Obj()).
+							Obj(), now,
+					).
+					AdmittedAt(true, now).
+					Obj(),
+				*utiltestingapi.MakeWorkload("partial-reserved-pending", "default").
+					Queue("tas-main").
+					PodSets(*utiltestingapi.MakePodSet("one", 1).
+						PreferredTopologyRequest(corev1.LabelHostname).
+						Request(corev1.ResourceCPU, "100m").
+						Request(corev1.ResourceMemory, "100Mi").
+						Toleration(corev1.Toleration{
+							Key:      "example.com/machine",
+							Operator: corev1.TolerationOpEqual,
+							Value:    "standard",
+							Effect:   corev1.TaintEffectNoSchedule,
+						}).
+						Toleration(corev1.Toleration{
+							Key:      "example.com/instance-type",
+							Operator: corev1.TolerationOpEqual,
+							Value:    "partial-reserved",
+							Effect:   corev1.TaintEffectNoSchedule,
+						}).
+						Obj()).
+					Obj(),
+			},
+			wantNewAssignments: map[workload.Reference]kueue.Admission{
+				"default/partial-reserved-pending": *utiltestingapi.MakeAdmission("tas-main").
+					PodSets(utiltestingapi.MakePodSetAssignment("one").
+						Assignment(corev1.ResourceCPU, "partial-reserved", "100m").
+						Assignment(corev1.ResourceMemory, "partial-reserved", "100Mi").
+						Count(1).
+						TopologyAssignment(utiltestingapi.MakeTopologyAssignment(
+							[]string{corev1.LabelHostname}).
+							Domain(utiltestingapi.MakeTopologyDomainAssignment([]string{"x2"}, 1).Obj()).
+							Obj()).
+						Obj()).
+					Obj(),
+			},
+			eventCmpOpts: cmp.Options{eventIgnoreMessage},
+			wantEvents: []utiltesting.EventRecord{
+				utiltesting.MakeEventRecord("default", "partial-reserved-pending", "QuotaReserved", corev1.EventTypeNormal).Obj(),
+				utiltesting.MakeEventRecord("default", "partial-reserved-pending", "Admitted", corev1.EventTypeNormal).Obj(),
+			},
+		},
 		"TAS workload gets scheduled as trimmed by partial admission": {
 			nodes:           defaultSingleNode,
 			topologies:      []kueue.Topology{defaultSingleLevelTopology},
