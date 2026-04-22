@@ -19,6 +19,7 @@ package scheduler
 import (
 	"iter"
 	"maps"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -197,13 +198,32 @@ func (c *ClusterQueueSnapshot) FindTopologyAssignmentsForWorkload(
 		option(opts)
 	}
 
+	// One shared assumedUsage per TopologyName for this workload. PodSets that
+	// end up on different sibling flavors (same Topology, hostname leaf) reserve
+	// against the same map, preventing intra-workload self-overlap on a shared
+	// physical node. Topologies with non-hostname leaf skip sharing.
+	sharedAssumed := make(map[kueue.TopologyReference]map[utiltas.TopologyDomainID]resources.Requests)
+
 	result := make(TASAssignmentsResult)
-	for tasFlavor, flavorTASRequests := range tasRequestsByFlavor {
+	// Iterate flavors in a deterministic order so that the shared assumedUsage
+	// produces reproducible placements across scheduling cycles. Go map
+	// iteration order is randomized and would otherwise make placement depend
+	// on the randomized order. ResourceFlavorReference is a string alias, so
+	// alphabetical sorting is well-defined.
+	for _, tasFlavor := range slices.Sorted(maps.Keys(tasRequestsByFlavor)) {
+		flavorTASRequests := tasRequestsByFlavor[tasFlavor]
 		// We assume the `tasFlavor` is already in the snapshot as this was
 		// already checked earlier during flavor assignment, and the set of
 		// flavors is immutable in snapshot.
 		tasFlavorCache := c.TASFlavors[tasFlavor]
-		flvResult := tasFlavorCache.FindTopologyAssignmentsForFlavor(flavorTASRequests, options...)
+		flvOpts := options
+		if tasFlavorCache != nil && tasFlavorCache.isLowestLevelNode {
+			if sharedAssumed[tasFlavorCache.topologyName] == nil {
+				sharedAssumed[tasFlavorCache.topologyName] = make(map[utiltas.TopologyDomainID]resources.Requests)
+			}
+			flvOpts = append(slices.Clone(options), WithSharedAssumedUsage(sharedAssumed[tasFlavorCache.topologyName]))
+		}
+		flvResult := tasFlavorCache.FindTopologyAssignmentsForFlavor(flavorTASRequests, flvOpts...)
 		maps.Copy(result, flvResult)
 	}
 	return result

@@ -115,19 +115,40 @@ func (c *TASFlavorCache) TopologyLevels() []string {
 	return c.topology.Levels
 }
 
-func (c *TASFlavorCache) snapshot(log logr.Logger, nodes []*nodeInfo) *TASFlavorSnapshot {
+// snapshot builds a TASFlavorSnapshot for this flavor.
+//
+// When sharedUsage is non-nil (eligible topology, hostname leaf), every leaf's
+// tasUsage aliases the sharedUsage entry for that DomainID. Sibling flavors on
+// the same Topology thereby see each other's TAS usage at build time and
+// through in-place Add/Sub mutations invoked from ClusterQueueSnapshot
+// during preemption / fair-sharing simulation.
+//
+// When sharedUsage is nil (ineligible topology), the function preserves its
+// original per-flavor accounting.
+func (c *TASFlavorCache) snapshot(log logr.Logger, nodes []*nodeInfo, sharedUsage map[utiltas.TopologyDomainID]resources.Requests) *TASFlavorSnapshot {
 	c.RLock()
 	defer c.RUnlock()
 	log.V(3).Info("Constructing TAS snapshot", "nodeLabels", c.flavor.NodeLabels,
-		"levels", c.topology.Levels, "nodeCount", len(nodes))
+		"levels", c.topology.Levels, "nodeCount", len(nodes), "crossFlavorAggregation", sharedUsage != nil)
 	snapshot := newTASFlavorSnapshot(log, c.flavor.TopologyName, c.topology.Levels, c.flavor.Tolerations)
 	nodeToDomain := make(map[string]utiltas.TopologyDomainID)
 	for _, node := range nodes {
-		nodeToDomain[node.Name] = snapshot.addNode(node)
+		domainID := snapshot.addNode(node)
+		nodeToDomain[node.Name] = domainID
+		if sharedUsage != nil {
+			shared, ok := sharedUsage[domainID]
+			if !ok {
+				shared = resources.Requests{}
+				sharedUsage[domainID] = shared
+			}
+			snapshot.leaves[domainID].tasUsage = shared
+		}
 	}
 	snapshot.initialize()
-	for domainID, usage := range c.usage {
-		snapshot.addTASUsage(domainID, usage)
+	if sharedUsage == nil {
+		for domainID, usage := range c.usage {
+			snapshot.addTASUsage(domainID, usage)
+		}
 	}
 	for nodeName, usage := range c.nonTasUsageCache.usagePerNode() {
 		if domainID, ok := nodeToDomain[nodeName]; ok {

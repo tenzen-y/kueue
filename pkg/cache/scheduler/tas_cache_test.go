@@ -386,6 +386,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 		pods         []corev1.Pod
 		levels       []string
 		nodeLabels   map[string]string
+		sharedUsage  map[tas.TopologyDomainID]resources.Requests
 		podSets      []PodSetTestCase
 	}{
 		"minimize the number of used racks before optimizing the number of nodes; BestFit": {
@@ -5948,6 +5949,60 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
+		"sibling-flavor usage on the shared hostname reduces remaining capacity": {
+			// Hostname-leaf topology: both flavors share physical nodes. sharedUsage
+			// simulates the map that Cache.Snapshot wires when a sibling flavor has
+			// admitted workloads consuming 1 CPU on b1-r1-x3. The pending PodSet
+			// requires hostname-level placement and 1 CPU — x3 is now 0-CPU effective,
+			// so placement must land on a different host.
+			levels:     []string{tasBlockLabel, corev1.LabelHostname},
+			nodes:      defaultNodes,
+			nodeLabels: map[string]string{},
+			sharedUsage: map[tas.TopologyDomainID]resources.Requests{
+				"x3": {corev1.ResourceCPU: 1000, corev1.ResourcePods: 1},
+			},
+			podSets: []PodSetTestCase{
+				{
+					podSetName: "main",
+					topologyRequest: &kueue.PodSetTopologyRequest{
+						Required: ptr.To(corev1.LabelHostname),
+					},
+					requests: resources.Requests{corev1.ResourceCPU: 1000},
+					count:    1,
+					// x3 is effectively 0 CPU due to sibling usage, so BestFit picks
+					// a different host. Without the shared-map aliasing, x3 would
+					// still look free and the assertion would read Values:["x3"].
+					wantAssignment: &tas.TopologyAssignment{
+						Levels:  []string{corev1.LabelHostname},
+						Domains: []tas.TopologyDomainAssignment{{Count: 1, Values: []string{"x1"}}},
+					},
+				},
+			},
+		},
+		"non-hostname-leaf topology: nil sharedUsage preserves per-flavor behavior": {
+			// Topology lowest level is rack (not hostname). Cache.Snapshot passes
+			// sharedUsage=nil for such topologies. The harness leaves tc.sharedUsage
+			// nil, so the flavor keeps its own cached usage (none here) and placement
+			// follows today's balanced-placement heuristic.
+			levels:     []string{tasBlockLabel, tasRackLabel},
+			nodes:      defaultNodes,
+			nodeLabels: map[string]string{},
+			podSets: []PodSetTestCase{
+				{
+					podSetName: "main",
+					topologyRequest: &kueue.PodSetTopologyRequest{
+						Required: ptr.To(tasRackLabel),
+					},
+					requests: resources.Requests{corev1.ResourceCPU: 1000},
+					count:    1,
+					// No sibling interference; BestFit picks a rack with a single-host fit.
+					wantAssignment: &tas.TopologyAssignment{
+						Levels:  []string{tasBlockLabel, tasRackLabel},
+						Domains: []tas.TopologyDomainAssignment{{Count: 1, Values: []string{"b1", "r1"}}},
+					},
+				},
+			},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -5982,7 +6037,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				tasCache.Update(&pod, log)
 			}
 			tasFlavorCache := tasCache.NewTASFlavorCache(topologyInformation, flavorInformation)
-			snapshot := tasFlavorCache.snapshot(log, tasCache.nodesCache.find(tasFlavorCache.flavor.NodeLabels, tasFlavorCache.topology.Levels))
+			snapshot := tasFlavorCache.snapshot(log, tasCache.nodesCache.find(tasFlavorCache.flavor.NodeLabels, tasFlavorCache.topology.Levels), tc.sharedUsage)
 			flavorTASRequests := make([]TASPodSetRequests, 0, len(tc.podSets))
 			wantResult := make(TASAssignmentsResult)
 			for _, ps := range tc.podSets {
@@ -6043,6 +6098,7 @@ func TestFindTopologyAssignmentsMultiLayerReplacement(t *testing.T) {
 		unhealthyNode   string
 		topologyRequest *kueue.PodSetTopologyRequest
 		count           int32
+		sharedUsage     map[tas.TopologyDomainID]resources.Requests
 		wantAssignment  *tas.TopologyAssignment
 		wantReason      string
 	}{
@@ -6308,6 +6364,59 @@ func TestFindTopologyAssignmentsMultiLayerReplacement(t *testing.T) {
 			// Without fix: sliceSize=1, scatters x4(1)+x5(1) → wrongly succeeds.
 			wantReason: `topology "default" doesn't allow to fit any of 1 slice(s). Total nodes: 4; excluded: topologyDomain: 2`,
 		},
+		"sibling-flavor sharedUsage on replacement candidate blocks the replacement": {
+			//       b1
+			//   /        \
+			//  r1        r2
+			//  /  \    /    \
+			// x1  x2  x3    x4
+			//          ^(NotReady)
+			//
+			// Same topology as "replacement fails when no capacity in incomplete slice domain",
+			// but x4 has full CPU allocatable (1). sharedUsage simulates a sibling flavor
+			// having consumed 1 CPU on x4, which must reduce x4's effective capacity for
+			// this flavor's replacement search.
+			nodes: []corev1.Node{
+				*testingnode.MakeNode("b1-r1-x1").
+					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r1").Label(corev1.LabelHostname, "x1").
+					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourcePods: resource.MustParse("10")}).
+					Ready().Obj(),
+				*testingnode.MakeNode("b1-r1-x2").
+					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r1").Label(corev1.LabelHostname, "x2").
+					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourcePods: resource.MustParse("10")}).
+					Ready().Obj(),
+				*testingnode.MakeNode("b1-r2-x3").
+					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r2").Label(corev1.LabelHostname, "x3").
+					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourcePods: resource.MustParse("10")}).
+					NotReady().Obj(),
+				*testingnode.MakeNode("b1-r2-x4").
+					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r2").Label(corev1.LabelHostname, "x4").
+					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourcePods: resource.MustParse("10")}).
+					Ready().Obj(),
+			},
+			existingTA: utiltestingapi.MakeTopologyAssignment([]string{corev1.LabelHostname}).
+				Domain(tas.TopologyDomainAssignment{Count: 1, Values: []string{"x1"}}).
+				Domain(tas.TopologyDomainAssignment{Count: 1, Values: []string{"x2"}}).
+				Domain(tas.TopologyDomainAssignment{Count: 1, Values: []string{"x3"}}).
+				Domain(tas.TopologyDomainAssignment{Count: 1, Values: []string{"x4"}}).
+				Obj(),
+			admissionCount: 4,
+			unhealthyNode:  "x3",
+			topologyRequest: &kueue.PodSetTopologyRequest{
+				Required: ptr.To(tasBlockLabel),
+				PodsetSliceRequiredTopologyConstraints: []kueue.PodsetSliceRequiredTopologyConstraint{
+					{Topology: tasRackLabel, Size: 2},
+				},
+			},
+			count: 4,
+			// Sibling flavor has consumed all 1 CPU on x4 via the shared (TopologyName, DomainID)
+			// map. x4 is the only candidate in r2 for replacing x3, and its effective capacity is
+			// now 0 CPU. Replacement must fail with the same reason as the no-capacity case.
+			sharedUsage: map[tas.TopologyDomainID]resources.Requests{
+				"x4": {corev1.ResourceCPU: 1000},
+			},
+			wantReason: `topology "default" doesn't allow to fit any of 1 pod(s). Total nodes: 3; excluded: resource "cpu": 1, topologyDomain: 2`,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -6362,7 +6471,7 @@ func TestFindTopologyAssignmentsMultiLayerReplacement(t *testing.T) {
 				flavorInformation{TopologyName: "default"},
 			)
 
-			snapshot := tasFlavorCache.snapshot(log, tasCache.nodesCache.find(tasFlavorCache.flavor.NodeLabels, tasFlavorCache.topology.Levels))
+			snapshot := tasFlavorCache.snapshot(log, tasCache.nodesCache.find(tasFlavorCache.flavor.NodeLabels, tasFlavorCache.topology.Levels), tc.sharedUsage)
 			result := snapshot.FindTopologyAssignmentsForFlavor(flavorTASRequests, WithWorkload(wl))
 
 			psResult, ok := result[podSetName]

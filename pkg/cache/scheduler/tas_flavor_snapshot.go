@@ -415,8 +415,9 @@ func (s *TASFlavorSnapshot) Fits(flavorUsage workload.TASFlavorUsage) bool {
 }
 
 type findTopologyAssignmentsOption struct {
-	simulateEmpty bool
-	workload      *kueue.Workload
+	simulateEmpty      bool
+	workload           *kueue.Workload
+	sharedAssumedUsage map[utiltas.TopologyDomainID]resources.Requests
 }
 
 // ExclusionStats tracks why nodes were excluded during TAS scheduling.
@@ -514,6 +515,15 @@ func WithWorkload(wl *kueue.Workload) FindTopologyAssignmentsOption {
 	}
 }
 
+// WithSharedAssumedUsage supplies a cross-flavor assumedUsage map so that
+// per-PodSet TAS placements within a single workload account for reservations
+// already made in sibling flavors sharing the same Topology (hostname leaf).
+func WithSharedAssumedUsage(m map[utiltas.TopologyDomainID]resources.Requests) FindTopologyAssignmentsOption {
+	return func(o *findTopologyAssignmentsOption) {
+		o.sharedAssumedUsage = m
+	}
+}
+
 // FindTopologyAssignmentsForFlavor returns TAS assignment, if possible, for all
 // the TAS requests in the flavor handled by the snapshot.
 func (s *TASFlavorSnapshot) FindTopologyAssignmentsForFlavor(flavorTASRequests FlavorTASRequests, options ...FindTopologyAssignmentsOption) TASAssignmentsResult {
@@ -523,7 +533,10 @@ func (s *TASFlavorSnapshot) FindTopologyAssignmentsForFlavor(flavorTASRequests F
 	}
 
 	result := make(map[kueue.PodSetReference]tasPodSetAssignmentResult)
-	assumedUsage := make(map[utiltas.TopologyDomainID]resources.Requests)
+	assumedUsage := opts.sharedAssumedUsage
+	if assumedUsage == nil {
+		assumedUsage = make(map[utiltas.TopologyDomainID]resources.Requests)
+	}
 
 	groupedTASRequests := make(map[string]FlavorTASRequests)
 	groupsOrder := make([]string, 0)

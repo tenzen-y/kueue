@@ -33,8 +33,10 @@ import (
 	"sigs.k8s.io/kueue/pkg/cache/hierarchy"
 	queueafs "sigs.k8s.io/kueue/pkg/cache/queue/afs"
 	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/resources"
 	afs "sigs.k8s.io/kueue/pkg/util/admissionfairsharing"
 	utilmaps "sigs.k8s.io/kueue/pkg/util/maps"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
@@ -185,8 +187,42 @@ func (c *Cache) Snapshot(ctx context.Context, options ...SnapshotOption) (*Snaps
 	}
 	tasSnapshots := make(map[kueue.ResourceFlavorReference]*TASFlavorSnapshot)
 	if features.Enabled(features.TopologyAwareScheduling) {
-		for flavor, cache := range c.tasCache.Clone() {
-			tasSnapshots[flavor] = cache.snapshot(log, c.tasCache.nodesCache.find(cache.flavor.NodeLabels, cache.topology.Levels))
+		flavorClone := c.tasCache.Clone()
+
+		// Aggregate each flavor's cached TAS usage into one resources.Requests map
+		// per (TopologyName, DomainID). Sibling flavors sharing the same Topology
+		// will alias leaf.tasUsage at the same map, so both build-time and
+		// simulate-time (preemption / fair-sharing) mutations propagate across
+		// them automatically.
+		//
+		// Gated to topologies whose lowest level is kubernetes.io/hostname, then
+		// DomainID == hostname, which uniquely identifies a physical node across
+		// flavors. Non-hostname leaves retain today's per-flavor accounting.
+		sharedUsage := make(map[kueue.TopologyReference]map[utiltas.TopologyDomainID]resources.Requests)
+		for _, cache := range flavorClone {
+			if len(cache.topology.Levels) == 0 || !utiltas.IsLowestLevelHostname(cache.topology.Levels) {
+				continue
+			}
+			cache.RLock()
+			topologyShared, ok := sharedUsage[cache.flavor.TopologyName]
+			if !ok {
+				topologyShared = make(map[utiltas.TopologyDomainID]resources.Requests)
+				sharedUsage[cache.flavor.TopologyName] = topologyShared
+			}
+			for domainID, domainUsage := range cache.usage {
+				var topologyDomainSharedUsage resources.Requests
+				if topologyDomainSharedUsage, ok = topologyShared[domainID]; ok {
+					topologyDomainSharedUsage.Add(domainUsage)
+				} else {
+					topologyShared[domainID] = domainUsage.Clone()
+				}
+			}
+			cache.RUnlock()
+		}
+
+		for flavor, cache := range flavorClone {
+			nodes := c.tasCache.nodesCache.find(cache.flavor.NodeLabels, cache.topology.Levels)
+			tasSnapshots[flavor] = cache.snapshot(log, nodes, sharedUsage[cache.flavor.TopologyName])
 		}
 	}
 	for _, cq := range cqNames {
