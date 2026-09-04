@@ -296,6 +296,14 @@ func validateClusterProfileAccessProviders(providers []configapi.ClusterProfileA
 
 func validateWaitForPodsReady(c *configapi.Configuration) field.ErrorList {
 	var allErrs field.ErrorList
+	if features.Enabled(features.WaitForPodsReadyUnschedulableTimeout) && features.Enabled(features.DisableWaitForPodsReady) {
+		allErrs = append(allErrs, field.Forbidden(featureGatesPath.Key(string(features.WaitForPodsReadyUnschedulableTimeout)),
+			"cannot be enabled together with DisableWaitForPodsReady"))
+	}
+	if c.WaitForPodsReady != nil && c.WaitForPodsReady.UnschedulableTimeout != nil && !features.Enabled(features.WaitForPodsReadyUnschedulableTimeout) {
+		allErrs = append(allErrs, field.Forbidden(waitForPodsReadyPath.Child("unschedulableTimeout"),
+			"requires the WaitForPodsReadyUnschedulableTimeout feature gate"))
+	}
 	if !waitforpodsready.Enabled(c.WaitForPodsReady) {
 		return allErrs
 	}
@@ -309,6 +317,16 @@ func validateWaitForPodsReady(c *configapi.Configuration) field.ErrorList {
 	if c.WaitForPodsReady.RecoveryTimeout != nil && c.WaitForPodsReady.RecoveryTimeout.Duration < 0 {
 		allErrs = append(allErrs, field.Invalid(waitForPodsReadyPath.Child("recoveryTimeout"),
 			c.WaitForPodsReady.RecoveryTimeout, apimachineryvalidation.IsNegativeErrorMsg))
+	}
+	if ut := c.WaitForPodsReady.UnschedulableTimeout; ut != nil {
+		switch {
+		case ut.Duration < 0:
+			allErrs = append(allErrs, field.Invalid(waitForPodsReadyPath.Child("unschedulableTimeout"),
+				ut, apimachineryvalidation.IsNegativeErrorMsg))
+		case ut.Duration > c.WaitForPodsReady.Timeout.Duration:
+			allErrs = append(allErrs, field.Invalid(waitForPodsReadyPath.Child("unschedulableTimeout"),
+				ut, "must not exceed waitForPodsReady.timeout"))
+		}
 	}
 	if strategy := c.WaitForPodsReady.RequeuingStrategy; strategy != nil {
 		if strategy.Timestamp != nil &&

@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/featuregate"
+	"time"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
@@ -32,6 +34,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	workloadpaddlejob "sigs.k8s.io/kueue/pkg/controller/jobs/kubeflow/jobs/paddlejob"
 	"sigs.k8s.io/kueue/pkg/controller/jobs/kubeflow/kubeflowjob"
+	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/tas"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
@@ -100,7 +103,7 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", framewor
 	)
 
 	ginkgo.BeforeAll(func() {
-		fwk.StartManager(ctx, cfg, managerSetup(jobframework.WithWaitForPodsReady(&configapi.WaitForPodsReady{}), jobframework.WithCache(schdcache.New(k8sClient))))
+		fwk.StartManager(ctx, cfg, managerSetup(jobframework.WithWaitForPodsReady(&configapi.WaitForPodsReady{UnschedulableTimeout: &metav1.Duration{Duration: time.Minute}}), jobframework.WithCache(schdcache.New(k8sClient))))
 
 		ginkgo.By("Create a resource flavor")
 		util.MustCreate(ctx, k8sClient, defaultFlavor)
@@ -133,6 +136,36 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", framewor
 				},
 			})
 		},
+		ginkgo.Entry("Unscheduled Pods", kftesting.PodsReadyTestSpec{
+			FeatureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+			},
+			PodsScheduled: &metav1.Condition{
+				Status: metav1.ConditionFalse,
+				Reason: kueue.WorkloadWaitForScheduling,
+			},
+			WantCondition: &metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForScheduling,
+				Message: "Not all pods are ready or succeeded",
+			},
+		}),
+		ginkgo.Entry("Scheduling observation ignored with feature disabled", kftesting.PodsReadyTestSpec{
+			FeatureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+			},
+			PodsScheduled: &metav1.Condition{
+				Status: metav1.ConditionFalse,
+				Reason: kueue.WorkloadWaitForScheduling,
+			},
+			WantCondition: &metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForStart,
+				Message: "Not all pods are ready or succeeded",
+			},
+		}),
 		ginkgo.Entry("No progress", kftesting.PodsReadyTestSpec{
 			WantCondition: &metav1.Condition{
 				Type:    kueue.WorkloadPodsReady,

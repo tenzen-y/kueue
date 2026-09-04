@@ -696,7 +696,8 @@ func Key(w *kueue.Workload) Reference {
 	return NewReference(w.Namespace, w.Name)
 }
 
-func reclaimableCounts(wl *kueue.Workload) map[kueue.PodSetReference]int32 {
+// ReclaimableCounts returns the reported reclaimable count for each PodSet.
+func ReclaimableCounts(wl *kueue.Workload) map[kueue.PodSetReference]int32 {
 	return utilslices.ToMap(wl.Status.ReclaimablePods, func(i int) (kueue.PodSetReference, int32) {
 		return wl.Status.ReclaimablePods[i].Name, wl.Status.ReclaimablePods[i].Count
 	})
@@ -713,7 +714,7 @@ func podSetsCountsAfterReclaim(wl *kueue.Workload) map[kueue.PodSetReference]int
 	if !features.Enabled(features.ReclaimablePods) {
 		return totalCounts
 	}
-	reclaimCounts := reclaimableCounts(wl)
+	reclaimCounts := ReclaimableCounts(wl)
 	for podSetName := range totalCounts {
 		if rc, found := reclaimCounts[podSetName]; found {
 			// The reclaimable count can transiently exceed the podSet count after an
@@ -861,6 +862,8 @@ func SetConditionAndUpdate(ctx context.Context,
 		return apimeta.SetStatusCondition(&wl.Status.Conditions, condition), nil
 	})
 }
+
+const PodsNotReadyMessage = "Not all pods are ready or succeeded"
 
 // UnsetQuotaReservationWithCondition sets the QuotaReserved condition to false, clears
 // the admission and set the WorkloadRequeued status.
@@ -1502,8 +1505,24 @@ func CreatePodsReadyCondition(status metav1.ConditionStatus, reason, message str
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: metav1.NewTime(clock.Now()),
-		// ObservedGeneration is added via workload.SetConditionAndUpdate
+		// ObservedGeneration is added by the caller.
 	}
+}
+
+func HasPodsScheduledCondition(wl *kueue.Workload) bool {
+	return apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPodsScheduled) != nil
+}
+
+func CurrentPodsScheduledCondition(wl *kueue.Workload, admittedAt time.Time) *metav1.Condition {
+	cond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPodsScheduled)
+	if cond == nil || !cond.LastTransitionTime.After(admittedAt) {
+		return nil
+	}
+	if cond.Status == metav1.ConditionFalse && cond.Reason == kueue.WorkloadWaitForScheduling ||
+		cond.Status == metav1.ConditionTrue && cond.Reason == kueue.WorkloadAllRequiredPodsScheduled {
+		return cond
+	}
+	return nil
 }
 
 func FinalizeOrphanedWorkload(ctx context.Context, c client.Client, clk clock.Clock, wl *kueue.Workload, canFinish bool) error {

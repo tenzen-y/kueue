@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/metrics"
 	"sigs.k8s.io/kueue/pkg/util/api"
 	utilqueue "sigs.k8s.io/kueue/pkg/util/queue"
@@ -292,6 +293,9 @@ func reportEvictedWorkload(recorder events.EventRecorder, wl *kueue.Workload, cq
 	eventReason := patching.ReasonWithCause(kueue.WorkloadEvicted, reason)
 	if reason == kueue.WorkloadDeactivated && underlyingCause != "" {
 		eventReason = patching.ReasonWithCause(eventReason, string(underlyingCause))
+	}
+	if features.Enabled(features.WaitForPodsReadyUnschedulableTimeout) && reason == kueue.WorkloadEvictedByPodsReadyTimeout && underlyingCause == kueue.WorkloadWaitForScheduling {
+		message += " (underlying cause: " + string(underlyingCause) + ")"
 	}
 	recorder.Eventf(wl, nil, corev1.EventTypeNormal, eventReason, eventReason, api.TruncateEventMessage(message))
 }

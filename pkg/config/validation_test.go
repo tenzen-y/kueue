@@ -313,7 +313,99 @@ func TestValidate(t *testing.T) {
 				},
 			},
 		},
+		"negative waitForPodsReady.unschedulableTimeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: -1,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout exceeding timeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5*time.Minute + time.Second,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout equal to timeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5 * time.Minute,
+					},
+				},
+			},
+		},
+		"zero waitForPodsReady.unschedulableTimeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{},
+				},
+			},
+		},
+		"positive waitForPodsReady.unschedulableTimeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: time.Minute,
+					},
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout with unspecified timeout": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: time.Minute,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "waitForPodsReady.timeout",
+				},
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
 		"valid waitForPodsReady": {
+			featureGates: map[featuregate.Feature]bool{features.WaitForPodsReadyUnschedulableTimeout: true},
 			cfg: &configapi.Configuration{
 				Integrations: defaultIntegrations,
 				WaitForPodsReady: &configapi.WaitForPodsReady{
@@ -323,6 +415,9 @@ func TestValidate(t *testing.T) {
 					RecoveryTimeout: &metav1.Duration{
 						Duration: 3,
 					},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5,
+					},
 					BlockAdmission: new(false),
 					RequeuingStrategy: &configapi.RequeuingStrategy{
 						Timestamp:          new(configapi.CreationTimestamp),
@@ -330,6 +425,142 @@ func TestValidate(t *testing.T) {
 						BackoffBaseSeconds: new(int32(30)),
 						BackoffMaxSeconds:  new(int32(1800)),
 					},
+				},
+			},
+		},
+		"unschedulableTimeout unset with its feature gate enabled": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.DisableWaitForPodsReady:              false,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+				},
+			},
+		},
+		"zero unschedulableTimeout requires its feature gate": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+				features.DisableWaitForPodsReady:              false,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{Duration: 0},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"positive unschedulableTimeout requires its feature gate": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+				features.DisableWaitForPodsReady:              false,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{Duration: time.Minute},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"zero unschedulableTimeout requires its feature gate even when WaitForPodsReady is disabled": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+				features.DisableWaitForPodsReady:              true,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{Duration: 0},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"positive unschedulableTimeout requires its feature gate even when WaitForPodsReady is disabled": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+				features.DisableWaitForPodsReady:              true,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{Duration: time.Minute},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"scheduling tracking and DisableWaitForPodsReady cannot be enabled together": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.DisableWaitForPodsReady:              true,
+			},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{Duration: time.Minute},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "featureGates[WaitForPodsReadyUnschedulableTimeout]",
+				},
+			},
+		},
+		"incompatible readiness gates are rejected without waitForPodsReady configuration": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.DisableWaitForPodsReady:              true,
+			},
+			cfg: &configapi.Configuration{Integrations: defaultIntegrations},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "featureGates[WaitForPodsReadyUnschedulableTimeout]",
+				},
+			},
+		},
+		"incompatible readiness gates are rejected without unschedulableTimeout": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.DisableWaitForPodsReady:              true,
+			},
+			cfg: &configapi.Configuration{
+				Integrations:     defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{Timeout: metav1.Duration{Duration: 5 * time.Minute}},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "featureGates[WaitForPodsReadyUnschedulableTimeout]",
 				},
 			},
 		},

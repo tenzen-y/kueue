@@ -3927,3 +3927,188 @@ func TestTotalExecutionTime(t *testing.T) {
 		})
 	}
 }
+
+func TestHasPodsScheduledCondition(t *testing.T) {
+	testCases := map[string]struct {
+		workload *kueue.Workload
+		want     bool
+	}{
+		"no conditions": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").Obj(),
+		},
+		"only another condition": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Condition(metav1.Condition{Type: kueue.WorkloadPodsReady, Status: metav1.ConditionTrue}).
+				Obj(),
+		},
+		"scheduled": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Condition(metav1.Condition{Type: kueue.WorkloadPodsScheduled, Status: metav1.ConditionTrue}).
+				Obj(),
+			want: true,
+		},
+		"not scheduled": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Condition(metav1.Condition{Type: kueue.WorkloadPodsScheduled, Status: metav1.ConditionFalse}).
+				Obj(),
+			want: true,
+		},
+		"unknown": {
+			workload: utiltestingapi.MakeWorkload("wl", "ns").
+				Condition(metav1.Condition{Type: kueue.WorkloadPodsScheduled, Status: metav1.ConditionUnknown}).
+				Obj(),
+			want: true,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			if got := HasPodsScheduledCondition(tc.workload); got != tc.want {
+				t.Errorf("HasPodsScheduledCondition() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCurrentPodsScheduledCondition(t *testing.T) {
+	fakeClock := testingclock.NewFakeClock(time.Now().Truncate(time.Second))
+	admittedAt := fakeClock.Now()
+	later := admittedAt.Add(time.Second)
+
+	testCases := map[string]struct {
+		generation int64
+		conditions []metav1.Condition
+		want       *metav1.Condition
+	}{
+		"no condition": {
+			generation: 1,
+		},
+		"other conditions only": {
+			generation: 1,
+			conditions: []metav1.Condition{{Type: kueue.WorkloadPodsReady, Status: metav1.ConditionFalse, Reason: kueue.WorkloadWaitForStart}},
+		},
+		"false and waiting for scheduling, observed after the admission": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionFalse,
+					Reason:             kueue.WorkloadWaitForScheduling,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(later),
+				},
+			},
+			want: &metav1.Condition{
+				Type:               kueue.WorkloadPodsScheduled,
+				Status:             metav1.ConditionFalse,
+				Reason:             kueue.WorkloadWaitForScheduling,
+				ObservedGeneration: 1,
+				LastTransitionTime: metav1.NewTime(later),
+			},
+		},
+		"true and all required pods scheduled, observed after the admission": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionTrue,
+					Reason:             kueue.WorkloadAllRequiredPodsScheduled,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(later),
+				},
+			},
+			want: &metav1.Condition{
+				Type:               kueue.WorkloadPodsScheduled,
+				Status:             metav1.ConditionTrue,
+				Reason:             kueue.WorkloadAllRequiredPodsScheduled,
+				ObservedGeneration: 1,
+				LastTransitionTime: metav1.NewTime(later),
+			},
+		},
+		"transitioned before the admission": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionFalse,
+					Reason:             kueue.WorkloadWaitForScheduling,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(admittedAt.Add(-time.Second)),
+				},
+			},
+		},
+		"transitioned in the same second as the admission": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionTrue,
+					Reason:             kueue.WorkloadAllRequiredPodsScheduled,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(admittedAt),
+				},
+			},
+		},
+		"an observation of an older generation is still valid": {
+			generation: 2,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionFalse,
+					Reason:             kueue.WorkloadWaitForScheduling,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(later),
+				},
+			},
+			want: &metav1.Condition{
+				Type:               kueue.WorkloadPodsScheduled,
+				Status:             metav1.ConditionFalse,
+				Reason:             kueue.WorkloadWaitForScheduling,
+				ObservedGeneration: 1,
+				LastTransitionTime: metav1.NewTime(later),
+			},
+		},
+		"unknown status": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionUnknown,
+					Reason:             kueue.WorkloadWaitForScheduling,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(later),
+				},
+			},
+		},
+		"false with an unexpected reason": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{Type: kueue.WorkloadPodsScheduled, Status: metav1.ConditionFalse, Reason: "SomethingElse", ObservedGeneration: 1, LastTransitionTime: metav1.NewTime(later)},
+			},
+		},
+		"true with the reason of the false status": {
+			generation: 1,
+			conditions: []metav1.Condition{
+				{
+					Type:               kueue.WorkloadPodsScheduled,
+					Status:             metav1.ConditionTrue,
+					Reason:             kueue.WorkloadWaitForScheduling,
+					ObservedGeneration: 1,
+					LastTransitionTime: metav1.NewTime(later),
+				},
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			wl := &kueue.Workload{
+				ObjectMeta: metav1.ObjectMeta{Generation: tc.generation},
+				Status:     kueue.WorkloadStatus{Conditions: tc.conditions},
+			}
+			got := CurrentPodsScheduledCondition(wl, admittedAt)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Unexpected condition (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}

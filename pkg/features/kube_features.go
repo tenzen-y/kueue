@@ -55,6 +55,13 @@ const (
 	//
 	// Deprecated: planned to be removed in 0.21. Temporary option while WaitForPodsReady is enabled by default.
 	DisableWaitForPodsReady featuregate.Feature = "DisableWaitForPodsReady"
+
+	// owner: @tenzen-y
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/13502-unscheduled-pods-timeout
+	//
+	// Tracks Pod scheduling and enables a separate timeout for unscheduled Pods.
+	WaitForPodsReadyUnschedulableTimeout featuregate.Feature = "WaitForPodsReadyUnschedulableTimeout"
+
 	// owner: @yaroslava-serdiuk
 	// kep: https://github.com/kubernetes-sigs/kueue/issues/1283
 	//
@@ -681,6 +688,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	DisableWaitForPodsReady: {
 		{Version: version.MustParse("0.19"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	WaitForPodsReadyUnschedulableTimeout: {
+		{Version: version.MustParse("0.20"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	PrioritySortingWithinCohort: {
 		{Version: version.MustParse("0.6"), Default: true, PreRelease: featuregate.Beta},

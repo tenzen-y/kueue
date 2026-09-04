@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
+	testingpod "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 	"sigs.k8s.io/kueue/pkg/workload"
 	workloadfinish "sigs.k8s.io/kueue/pkg/workload/finish"
 )
@@ -102,6 +103,242 @@ func TestEnabled(t *testing.T) {
 			features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, true)
 			if got := Enabled(tt.args.object); got != tt.want {
 				t.Errorf("Enabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListPodsForWorkloadSlice(t *testing.T) {
+	errListPods := errors.New("list pods failed")
+	pods := []client.Object{
+		testingpod.MakePod("origin-pod", "ns").Annotation(kueue.WorkloadSliceNameAnnotation, "origin").Annotation(kueue.WorkloadAnnotation, "origin").Obj(),
+		testingpod.MakePod("replacement-pod", "ns").Annotation(kueue.WorkloadSliceNameAnnotation, "origin").Annotation(kueue.WorkloadAnnotation, "replacement").Label("role", "worker").Obj(),
+		testingpod.MakePod("succeeded-pod", "ns").Annotation(kueue.WorkloadSliceNameAnnotation, "origin").StatusPhase(corev1.PodSucceeded).Obj(),
+		testingpod.MakePod("failed-pod", "ns").Annotation(kueue.WorkloadSliceNameAnnotation, "origin").StatusPhase(corev1.PodFailed).Obj(),
+		testingpod.MakePod("other-namespace", "other").Annotation(kueue.WorkloadSliceNameAnnotation, "origin").Obj(),
+		testingpod.MakePod("regular-pod", "ns").Annotation(kueue.WorkloadAnnotation, "regular").Obj(),
+		testingpod.MakePod("unrelated-pod", "ns").Obj(),
+	}
+	testCases := map[string]struct {
+		sliceName   string
+		listOptions []client.ListOption
+		wantNames   []string
+		wantErr     error
+	}{
+		"all pods in the slice chain, including terminal pods": {
+			sliceName: "origin",
+			wantNames: []string{"failed-pod", "origin-pod", "replacement-pod", "succeeded-pod"},
+		},
+		"additional label selector": {
+			sliceName:   "origin",
+			listOptions: []client.ListOption{client.MatchingLabels{"role": "worker"}},
+			wantNames:   []string{"replacement-pod"},
+		},
+		"regular workload uses the workload annotation": {
+			sliceName: "regular",
+			wantNames: []string{"regular-pod"},
+		},
+		"no matching pods": {
+			sliceName: "missing",
+		},
+		"list failure is returned": {
+			sliceName: "origin",
+			wantErr:   errListPods,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			ctx, _ := utiltesting.ContextWithLog(t)
+			cl := utiltesting.NewClientBuilder().
+				WithObjects(pods...).
+				WithIndex(&corev1.Pod{}, indexer.WorkloadSliceNameKey, indexer.IndexPodWorkloadSliceName).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, objs client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := objs.(*corev1.PodList); ok && errors.Is(tc.wantErr, errListPods) {
+							return errListPods
+						}
+						return c.List(ctx, objs, opts...)
+					},
+				}).
+				Build()
+			got, err := ListPodsForWorkloadSlice(ctx, cl, "ns", tc.sliceName, tc.listOptions...)
+			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); diff != "" {
+				t.Errorf("Unexpected error (-want,+got):\n%s", diff)
+			}
+			var gotNames []string
+			for _, pod := range got {
+				gotNames = append(gotNames, pod.Name)
+			}
+			if diff := cmp.Diff(tc.wantNames, gotNames, cmpopts.SortSlices(func(a, b string) bool {
+				return a < b
+			})); diff != "" {
+				t.Errorf("Unexpected pods (-want,+got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFindLatestAdmittedWorkload(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.ElasticJobsViaWorkloadSlices, true)
+	fakeClock := testingclock.NewFakeClock(time.Now().Truncate(time.Second))
+	errListWorkloads := errors.New("list workloads failed")
+
+	origin := utiltestingapi.MakeWorkload("origin", "ns").
+		Annotation(EnabledAnnotationKey, EnabledAnnotationValue).
+		Creation(fakeClock.Now().Add(-time.Minute)).
+		ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), fakeClock.Now().Add(-time.Minute)).
+		AdmittedAt(true, fakeClock.Now().Add(-time.Minute))
+	replacement := utiltestingapi.MakeWorkload("replacement", "ns").
+		Annotation(EnabledAnnotationKey, EnabledAnnotationValue).
+		Annotation(kueue.WorkloadSliceNameAnnotation, "origin").
+		Creation(fakeClock.Now()).
+		ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), fakeClock.Now()).
+		AdmittedAt(true, fakeClock.Now())
+	variant := utiltestingapi.MakeWorkload("variant", "ns").
+		Annotation(EnabledAnnotationKey, EnabledAnnotationValue).
+		Annotation(kueue.WorkloadSliceNameAnnotation, "origin").
+		Creation(fakeClock.Now().Add(time.Second)).
+		OwnerReference(kueue.SchemeGroupVersion.WithKind("Workload"), "replacement", "parent-uid").
+		ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), fakeClock.Now()).
+		AdmittedAt(true, fakeClock.Now())
+
+	testCases := map[string]struct {
+		featureGates    map[featuregate.Feature]bool
+		excludeVariants bool
+		workload        *kueue.Workload
+		workloads       []*kueue.Workload
+		wantName        string
+		wantErr         error
+	}{
+		"nil workload": {},
+		"origin without the elastic annotation retains the slice lookup": {
+			workload:  utiltestingapi.MakeWorkload("origin", "ns").Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Obj()},
+			wantName:  "replacement",
+		},
+		"elastic feature gate disabled retains the slice lookup": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: false},
+			workload:     origin.Obj(),
+			workloads:    []*kueue.Workload{origin.Obj(), replacement.Obj()},
+			wantName:     "replacement",
+		},
+		"no admitted slice": {
+			workload: origin.Obj(),
+		},
+		"list failure is returned": {
+			workload: origin.Obj(),
+			wantErr:  errListWorkloads,
+		},
+		"finished origin resolves to the replacement": {
+			workload: origin.Clone().
+				FinishedAt(fakeClock.Now()).
+				Obj(),
+			workloads: []*kueue.Workload{origin.Clone().
+				FinishedAt(fakeClock.Now()).
+				Obj(), replacement.Obj()},
+			wantName: "replacement",
+		},
+		"latest admitted replacement is selected": {
+			workload:  origin.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Obj()},
+			wantName:  "replacement",
+		},
+		"newer admitted variant does not hide the replacement slice": {
+			excludeVariants: true,
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.ConcurrentAdmission:                  true,
+			},
+			workload: origin.Obj(),
+			workloads: []*kueue.Workload{
+				origin.Clone().
+					FinishedAt(fakeClock.Now()).
+					Obj(),
+				replacement.Obj(),
+				variant.Obj(),
+			},
+			wantName: "replacement",
+		},
+		"scheduling feature gate disabled preserves variant selection": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+				features.ConcurrentAdmission:                  true,
+			},
+			workload:  origin.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Obj(), variant.Obj()},
+			wantName:  "variant",
+		},
+		"ungater lookup preserves variant selection with the scheduling gate enabled": {
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.ConcurrentAdmission:                  true,
+			},
+			workload:  origin.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Obj(), variant.Obj()},
+			wantName:  "variant",
+		},
+		"concurrent admission disabled preserves variant selection": {
+			excludeVariants: true,
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+				features.ConcurrentAdmission:                  false,
+			},
+			workload:  origin.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Obj(), variant.Obj()},
+			wantName:  "variant",
+		},
+		"evicted replacement is ignored": {
+			workload: replacement.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Clone().
+				EvictedAt(fakeClock.Now()).
+				Obj()},
+			wantName: "origin",
+		},
+		"finished replacement is ignored": {
+			workload: replacement.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(), replacement.Clone().
+				FinishedAt(fakeClock.Now()).
+				Obj()},
+			wantName: "origin",
+		},
+		"replacement in another namespace is ignored": {
+			workload: origin.Obj(),
+			workloads: []*kueue.Workload{origin.Obj(),
+				utiltestingapi.MakeWorkload("replacement", "other").
+					Annotation(kueue.WorkloadSliceNameAnnotation, "origin").
+					ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").Obj(), fakeClock.Now()).
+					AdmittedAt(true, fakeClock.Now()).
+					Obj()},
+			wantName: "origin",
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			features.SetFeatureGatesDuringTest(t, tc.featureGates)
+			ctx, _ := utiltesting.ContextWithLog(t)
+			builder := utiltesting.NewClientBuilder().
+				WithIndex(&kueue.Workload{}, indexer.WorkloadSliceNameKey, indexer.IndexWorkloadSliceName).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, objs client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := objs.(*kueue.WorkloadList); ok && errors.Is(tc.wantErr, errListWorkloads) {
+							return errListWorkloads
+						}
+						return c.List(ctx, objs, opts...)
+					},
+				})
+			for _, wl := range tc.workloads {
+				builder = builder.WithObjects(wl)
+			}
+			got, err := FindLatestAdmittedWorkload(ctx, builder.Build(), tc.workload, tc.excludeVariants)
+			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); diff != "" {
+				t.Errorf("Unexpected error (-want,+got):\n%s", diff)
+			}
+			var gotName string
+			if got != nil {
+				gotName = got.Name
+			}
+			if diff := cmp.Diff(tc.wantName, gotName); diff != "" {
+				t.Errorf("Unexpected workload name (-want,+got):\n%s", diff)
 			}
 		})
 	}

@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption"
 	"sigs.k8s.io/kueue/pkg/workload"
+	"sigs.k8s.io/kueue/pkg/workload/concurrentadmission"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
 	workloadfinish "sigs.k8s.io/kueue/pkg/workload/finish"
 )
@@ -129,10 +130,21 @@ func FindNotFinishedWorkloads(ctx context.Context, clnt client.Client, jobObject
 	return sortAndFilterNotFinishedWorkloads(list.Items), nil
 }
 
+// FindLatestAdmittedWorkload returns the latest admitted slice in wl's chain,
+// or nil if wl is nil or the chain has no admitted slice.
+// excludeVariants lets scheduling observation select only Parent slices.
+func FindLatestAdmittedWorkload(ctx context.Context, clnt client.Client, wl *kueue.Workload, excludeVariants bool) (*kueue.Workload, error) {
+	if wl == nil {
+		return nil, nil
+	}
+	return FindLatestAdmittedWorkloadForSlice(ctx, clnt, wl.Namespace, SliceName(wl), excludeVariants)
+}
+
 // FindLatestAdmittedWorkloadForSlice returns the admitted slice of the chain
 // identified by its first slice's name (sliceName), which every slice and pod of an
 // elastic job carries, or nil if none is admitted.
-func FindLatestAdmittedWorkloadForSlice(ctx context.Context, clnt client.Client, namespace, sliceName string) (*kueue.Workload, error) {
+// excludeVariants lets scheduling observation select only Parent slices.
+func FindLatestAdmittedWorkloadForSlice(ctx context.Context, clnt client.Client, namespace, sliceName string, excludeVariants bool) (*kueue.Workload, error) {
 	list := &kueue.WorkloadList{}
 	if err := clnt.List(ctx, list, client.InNamespace(namespace),
 		client.MatchingFields{indexer.WorkloadSliceNameKey: sliceName}); err != nil {
@@ -142,6 +154,10 @@ func FindLatestAdmittedWorkloadForSlice(ctx context.Context, clnt client.Client,
 	workloads := sortAndFilterNotFinishedWorkloads(list.Items)
 	for i := range slices.Backward(workloads) {
 		wl := &workloads[i]
+		// Variants inherit the chain annotation, but observations belong to the Parent slice.
+		if excludeVariants && features.Enabled(features.ConcurrentAdmission) && concurrentadmission.IsVariant(wl) {
+			continue
+		}
 		// Eviction is two writes: the condition is set before the reservation is
 		// released, so an evicted slice can still report itself admitted while its
 		// capacity is on the way out.

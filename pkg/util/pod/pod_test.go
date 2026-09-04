@@ -263,6 +263,51 @@ func TestIsTerminated(t *testing.T) {
 	}
 }
 
+func TestIsScheduled(t *testing.T) {
+	cases := map[string]struct {
+		pod           *corev1.Pod
+		wantScheduled bool
+	}{
+		"node name set": {
+			pod: testingpod.MakePod("", "").
+				NodeName("node-1").
+				Obj(),
+			wantScheduled: true,
+		},
+		"PodScheduled=True": {
+			pod: testingpod.MakePod("", "").
+				StatusConditions(corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}).
+				Obj(),
+			wantScheduled: true,
+		},
+		"PodScheduled=False": {
+			pod: testingpod.MakePod("", "").
+				StatusConditions(corev1.PodCondition{Type: corev1.PodScheduled, Status: corev1.ConditionFalse}).
+				Obj(),
+		},
+		"gated pod without the condition": {
+			pod: testingpod.MakePod("", "").
+				KueueSchedulingGate().
+				Obj(),
+		},
+		"failed pod with node name": {
+			pod: testingpod.MakePod("", "").
+				NodeName("node-1").
+				StatusPhase(corev1.PodFailed).
+				Obj(),
+			wantScheduled: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := IsScheduled(tc.pod)
+			if tc.wantScheduled != got {
+				t.Errorf("Unexpected Pod scheduled\nwant: %v\ngot: %v\n", tc.wantScheduled, got)
+			}
+		})
+	}
+}
+
 func TestSpecShape(t *testing.T) {
 	podResources := &corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},

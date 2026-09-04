@@ -18,6 +18,7 @@ package mpijob
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/google/go-cmp/cmp/cmpopts"
 	kfmpi "github.com/kubeflow/mpi-operator/pkg/apis/kubeflow/v2beta1"
@@ -28,21 +29,25 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	pkgconstants "sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	workloadmpijob "sigs.k8s.io/kueue/pkg/controller/jobs/mpijob"
+	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/tas"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
 	testingmpijob "sigs.k8s.io/kueue/pkg/util/testingjobs/mpijob"
 	testingnode "sigs.k8s.io/kueue/pkg/util/testingjobs/node"
+	testingpod "sigs.k8s.io/kueue/pkg/util/testingjobs/pod"
 	workloadpatching "sigs.k8s.io/kueue/pkg/workload/patching"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -556,6 +561,8 @@ var _ = ginkgo.Describe("Job controller for workloads when only jobs with queue 
 
 var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", ginkgo.Ordered, ginkgo.ContinueOnFailure, func() {
 	type podsReadyTestSpec struct {
+		featureGates    map[featuregate.Feature]bool
+		podsScheduled   *metav1.Condition
 		beforeJobStatus *kfmpi.JobStatus
 		beforeCondition *metav1.Condition
 		jobStatus       kfmpi.JobStatus
@@ -569,7 +576,7 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", ginkgo.O
 	)
 
 	ginkgo.BeforeAll(func() {
-		fwk.StartManager(ctx, cfg, managerSetup(false, jobframework.WithWaitForPodsReady(&configapi.WaitForPodsReady{})))
+		fwk.StartManager(ctx, cfg, managerSetup(false, jobframework.WithWaitForPodsReady(&configapi.WaitForPodsReady{UnschedulableTimeout: &metav1.Duration{Duration: time.Minute}})))
 
 		ginkgo.By("Create a resource flavor")
 		util.MustCreate(ctx, k8sClient, defaultFlavor)
@@ -588,6 +595,7 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", ginkgo.O
 
 	ginkgo.DescribeTable("Single job at different stages of progress towards completion",
 		func(podsReadyTestSpec podsReadyTestSpec) {
+			features.SetFeatureGatesDuringTest(ginkgo.GinkgoTB(), podsReadyTestSpec.featureGates)
 			ginkgo.By("Create a job")
 			job := testingmpijob.MakeMPIJob(jobName, ns.Name).
 				GenericLauncherAndWorker().
@@ -635,6 +643,10 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", ginkgo.O
 				g.Expect(createdJob.Spec.RunPolicy.Suspend).Should(gomega.Equal(new(false)))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 
+			if podsReadyTestSpec.podsScheduled != nil {
+				util.SetPodsScheduledCondition(ctx, k8sClient, wlLookupKey, *podsReadyTestSpec.podsScheduled)
+			}
+
 			if podsReadyTestSpec.beforeJobStatus != nil {
 				ginkgo.By("Update the job status to simulate its initial progress towards completion")
 				createdJob.Status = *podsReadyTestSpec.beforeJobStatus
@@ -671,6 +683,36 @@ var _ = ginkgo.Describe("Job controller when waitForPodsReady enabled", ginkgo.O
 				)
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
 		},
+		ginkgo.Entry("Unscheduled Pods", podsReadyTestSpec{
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: true,
+			},
+			podsScheduled: &metav1.Condition{
+				Status: metav1.ConditionFalse,
+				Reason: kueue.WorkloadWaitForScheduling,
+			},
+			wantCondition: &metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForScheduling,
+				Message: "Not all pods are ready or succeeded",
+			},
+		}),
+		ginkgo.Entry("Scheduling observation ignored with feature disabled", podsReadyTestSpec{
+			featureGates: map[featuregate.Feature]bool{
+				features.WaitForPodsReadyUnschedulableTimeout: false,
+			},
+			podsScheduled: &metav1.Condition{
+				Status: metav1.ConditionFalse,
+				Reason: kueue.WorkloadWaitForScheduling,
+			},
+			wantCondition: &metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForStart,
+				Message: "Not all pods are ready or succeeded",
+			},
+		}),
 		ginkgo.Entry("No progress", podsReadyTestSpec{
 			wantCondition: &metav1.Condition{
 				Type:    kueue.WorkloadPodsReady,
@@ -1103,6 +1145,162 @@ var _ = ginkgo.Describe("MPIJob controller with TopologyAwareScheduling", ginkgo
 					}),
 				))
 			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+		})
+	})
+})
+
+var _ = ginkgo.Describe("MPIJob controller interacting with Workload controller when waitForPodsReady is enabled", ginkgo.Ordered, ginkgo.ContinueOnFailure, func() {
+	var (
+		waitForPodsReady *configapi.WaitForPodsReady
+		ns               *corev1.Namespace
+		defaultFlavor    *kueue.ResourceFlavor
+	)
+
+	ginkgo.JustBeforeEach(func() {
+		fwk.StartManager(ctx, cfg, managerSetupWithConfiguration(
+			&configapi.Configuration{WaitForPodsReady: waitForPodsReady},
+			false,
+			jobframework.WithWaitForPodsReady(waitForPodsReady),
+		))
+
+		ns = util.CreateNamespaceFromPrefixWithLog(ctx, k8sClient, "core-")
+
+		defaultFlavor = utiltestingapi.MakeResourceFlavor("default").
+			NodeLabel(instanceKey, "default").
+			Obj()
+		util.MustCreate(ctx, k8sClient, defaultFlavor)
+	})
+
+	ginkgo.JustAfterEach(func() {
+		gomega.Expect(util.DeleteNamespace(ctx, k8sClient, ns)).To(gomega.Succeed())
+		util.ExpectObjectToBeDeleted(ctx, k8sClient, defaultFlavor, true)
+		fwk.StopManager(ctx)
+	})
+
+	ginkgo.When("unschedulableTimeout is configured", func() {
+		const (
+			unschedulableTimeout = 30 * time.Second
+			workerReplicas       = 2
+		)
+
+		ginkgo.BeforeEach(func() {
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.WaitForPodsReadyUnschedulableTimeout, true)
+			waitForPodsReady = &configapi.WaitForPodsReady{
+				Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+				UnschedulableTimeout: &metav1.Duration{Duration: unschedulableTimeout},
+				RecoveryTimeout:      &metav1.Duration{},
+				RequeuingStrategy: &configapi.RequeuingStrategy{
+					Timestamp:          new(configapi.EvictionTimestamp),
+					BackoffBaseSeconds: new(int32(10)),
+				},
+			}
+		})
+
+		ginkgo.It("should report the PodsScheduled condition from the launcher and worker pods", func() {
+			ginkgo.By("creating an MPIJob with a launcher and two workers")
+			job := testingmpijob.MakeMPIJob(jobName, ns.Name).
+				Queue("test-queue").
+				GenericLauncherAndWorker().
+				Parallelism(workerReplicas).
+				Obj()
+			util.MustCreate(ctx, k8sClient, job)
+			jobKey := client.ObjectKeyFromObject(job)
+			wlKey := types.NamespacedName{Name: workloadmpijob.GetWorkloadNameForMPIJob(job.Name, job.UID), Namespace: ns.Name}
+
+			ginkgo.By("admitting the workload created for the MPIJob")
+			wl := &kueue.Workload{}
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+				g.Expect(wl.Spec.PodSets).To(gomega.HaveLen(2))
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+			podSetAssignments := make([]kueue.PodSetAssignment, 0, len(wl.Spec.PodSets))
+			for _, podSet := range wl.Spec.PodSets {
+				podSetAssignments = append(podSetAssignments, kueue.PodSetAssignment{
+					Name: podSet.Name,
+					Flavors: map[corev1.ResourceName]kueue.ResourceFlavorReference{
+						corev1.ResourceCPU: kueue.ResourceFlavorReference(defaultFlavor.Name),
+					},
+					Count: new(podSet.Count),
+				})
+			}
+			util.SetQuotaReservation(ctx, k8sClient, wlKey, utiltestingapi.MakeAdmission("foo").
+				PodSets(podSetAssignments...).
+				Obj())
+			util.SyncAdmittedConditionForWorkloads(ctx, k8sClient, wl)
+
+			ginkgo.By("checking the MPIJob is unsuspended with the workload annotations and the PodSet label on the launcher and worker pod templates")
+			createdJob := &kfmpi.MPIJob{}
+			gomega.Eventually(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, jobKey, createdJob)).To(gomega.Succeed())
+				g.Expect(createdJob.Spec.RunPolicy.Suspend).To(gomega.Equal(new(false)))
+				for replicaType, replicaSpec := range createdJob.Spec.MPIReplicaSpecs {
+					g.Expect(replicaSpec.Template.Annotations).To(gomega.HaveKeyWithValue(kueue.WorkloadAnnotation, wlKey.Name), string(replicaType))
+					g.Expect(replicaSpec.Template.Labels).To(gomega.HaveKeyWithValue(pkgconstants.PodSetLabel, string(kueue.NewPodSetReference(string(replicaType)))), string(replicaType))
+				}
+			}, util.Timeout, util.Interval).Should(gomega.Succeed())
+
+			ginkgo.By("creating unscheduled pods for the launcher and the workers from the pod templates")
+			pods := make([]*corev1.Pod, 0, workerReplicas+1)
+			for _, replicaSpec := range createdJob.Spec.MPIReplicaSpecs {
+				template := replicaSpec.Template
+				podSetName := template.Labels[pkgconstants.PodSetLabel]
+				for i := range ptr.Deref(replicaSpec.Replicas, 1) {
+					pod := testingpod.MakePod(fmt.Sprintf("%s-%d", podSetName, i), ns.Name).
+						Annotation(kueue.WorkloadAnnotation, template.Annotations[kueue.WorkloadAnnotation]).
+						Label(pkgconstants.PodSetLabel, podSetName).
+						Obj()
+					util.MustCreate(ctx, k8sClient, pod)
+					pods = append(pods, pod)
+				}
+			}
+			gomega.Expect(pods).To(gomega.HaveLen(workerReplicas + 1))
+
+			ginkgo.By("checking the PodsScheduled condition reports the unscheduled pods")
+			unscheduled := metav1.Condition{
+				Type:    kueue.WorkloadPodsScheduled,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForScheduling,
+				Message: "At least one required pod is not scheduled",
+			}
+			util.ExpectWorkloadToHaveConditions(ctx, k8sClient, wlKey, unscheduled)
+
+			ginkgo.By("checking the PodsReady condition reports the unscheduled pods")
+			util.ExpectWorkloadToHaveConditions(ctx, k8sClient, wlKey, metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForScheduling,
+				Message: "Not all pods are ready or succeeded",
+			})
+
+			ginkgo.By("binding all the pods but one to a node")
+			util.BindPodWithNode(ctx, k8sClient, "node", pods[:len(pods)-1]...)
+
+			ginkgo.By("checking the PodsScheduled condition keeps reporting the unscheduled pod")
+			gomega.Consistently(func(g gomega.Gomega) {
+				g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
+				g.Expect(wl.Status.Conditions).To(gomega.ContainElement(
+					gomega.BeComparableTo(unscheduled, util.IgnoreConditionTimestampsAndObservedGeneration),
+				))
+			}, pkgconstants.UpdatesBatchPeriod+util.ShortTimeout, util.Interval).Should(gomega.Succeed())
+
+			ginkgo.By("binding the last pod to a node")
+			util.BindPodWithNode(ctx, k8sClient, "node", pods[len(pods)-1])
+
+			ginkgo.By("checking the PodsScheduled condition reports all the pods scheduled")
+			util.ExpectWorkloadToHaveConditions(ctx, k8sClient, wlKey, metav1.Condition{
+				Type:    kueue.WorkloadPodsScheduled,
+				Status:  metav1.ConditionTrue,
+				Reason:  kueue.WorkloadAllRequiredPodsScheduled,
+				Message: "All required pods were scheduled or succeeded",
+			})
+
+			ginkgo.By("checking the PodsReady condition waits for the pods to start")
+			util.ExpectWorkloadToHaveConditions(ctx, k8sClient, wlKey, metav1.Condition{
+				Type:    kueue.WorkloadPodsReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  kueue.WorkloadWaitForStart,
+				Message: "Not all pods are ready or succeeded",
+			})
 		})
 	})
 })
