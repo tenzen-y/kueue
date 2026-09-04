@@ -144,6 +144,28 @@ The `count` can only increase while the workload holds a Quota Reservation.
 This mechanism allows a Job to be evicted and re-queued if the job doesn't become ready.
 Please refer to the [All-or-nothing with ready Pods](/docs/tasks/manage/setup_wait_for_pods_ready/) for more details.
 
+The readiness of an admitted Workload is reported in the `PodsReady` condition. A
+`PodsReady=False` condition carries one of the following reasons:
+
+- `WaitForStart`: the Pods have not been ready since the admission (or the Workload is not admitted).
+- `WaitForScheduling`: the Pods have not been ready since the admission and at least one
+  required Pod is not scheduled yet, as reported by the `PodsScheduled` condition.
+- `WaitForRecovery`: the Pods were ready since the admission, but a Pod has failed or was lost.
+
+The `PodsScheduled` condition is reported when `waitForPodsReady` is enabled. The tracker
+writes the observation for the current admission after it observes a live Pod, or when
+retained Succeeded Pods alone fill the whole admission. It is `False` with reason
+`WaitForScheduling` while at least one required Pod is not scheduled, and `True` with reason
+`AllRequiredPodsScheduled` once all the required Pods are scheduled or have succeeded. No
+current-admission observation is written while neither condition holds yet (for example, before
+the job creates any Pod), when every Pod lacks both the
+`kueue.x-k8s.io/workload-slice-name` and `kueue.x-k8s.io/workload` indexing annotations (as can
+happen for Pods created before an upgrade), for ConcurrentAdmission Variant Workloads, or on a
+MultiKueue manager cluster for Workloads delegated to a worker cluster. A condition from a
+previous admission may remain visible; Kueue ignores it.
+See [Unschedulable timeout](/docs/tasks/manage/setup_wait_for_pods_ready/#unschedulable-timeout)
+for the details.
+
 ### Exponential Backoff Requeueing
 
 Once evictions with `PodsReadyTimeout` reasons occur, a Workload will be re-queued with backoff.
@@ -179,8 +201,9 @@ combination of `reason` and `underlyingCause`:
   was set to `false`, either by a user or automatically by Kueue (for example, after
   exceeding the [requeuing limit](#exponential-backoff-requeueing)).
 - `underlyingCause` provides a finer-grained explanation that complements `reason`
-  (for example, `WaitForStart` under `PodsReadyTimeout`, or `RequeuingLimitExceeded`
-  under `Deactivated`). It is an empty string when `reason` is itself the root cause.
+  (for example, `WaitForStart`, `WaitForScheduling` or `WaitForRecovery` under
+  `PodsReadyTimeout`, or `RequeuingLimitExceeded` under `Deactivated`). It is an empty
+  string when `reason` is itself the root cause.
 - `count` is the number of times the Workload has been evicted for that `reason` and
   `underlyingCause`.
 

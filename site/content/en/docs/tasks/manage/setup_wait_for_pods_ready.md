@@ -43,6 +43,7 @@ install a release version and customize the default `waitForPodsReady` configura
     waitForPodsReady:
       timeout: 30m
       recoveryTimeout: 30m
+      unschedulableTimeout: 5m
       blockAdmission: false
       requeuingStrategy:
         timestamp: Eviction | Creation
@@ -64,10 +65,10 @@ kubectl delete pods --all -n kueue-system
 The `timeout` (`waitForPodsReady.timeout`) is an optional parameter, defaulting to
 30 minutes.
 
-When the `timeout` expires for an admitted Workload, and the workload's
-pods are not all scheduled yet (i.e., the Workload condition remains
-`PodsReady=False`), then the Workload's admission is
-cancelled, the corresponding job is suspended and the Workload is re-queued.
+When the `timeout` expires for an admitted Workload and its Pods are not
+all ready yet (that is, the Workload condition remains `PodsReady=False`),
+the Workload's admission is cancelled, the corresponding Job is suspended,
+and the Workload is requeued.
 
 `recoveryTimeout` is an optional parameter used for
 workloads that are already running but have one or more Pods in a not-ready state
@@ -81,6 +82,68 @@ recovery timeout checking.
 The `blockAdmission` (`waitForPodsReady.blockAdmission`) is an optional parameter.
 When enabled, then the workloads are admitted sequentially to prevent deadlock
 situations as demonstrated in the example below.
+
+### Unschedulable timeout
+
+{{< feature-state state="beta" for_version="v0.20" >}}
+
+`unschedulableTimeout` (`waitForPodsReady.unschedulableTimeout`) is an optional
+parameter that bounds how long an admitted Workload may wait for all the Pods
+required by its admission to be scheduled (bound to a node) or to have succeeded.
+The regular `timeout` is meant for the startup of scheduled Pods (image pulls,
+init containers, readiness probes); Pods that stay Pending because of a transient
+scheduling problem can be detected sooner with `unschedulableTimeout`.
+
+Whenever `waitForPodsReady` is enabled, Kueue adds the `kueue.x-k8s.io/workload`
+and `kueue.x-k8s.io/workload-uid` annotations to the Pod templates of the jobs it
+starts (for the pod-based integrations, to the gated Pods when Kueue starts them),
+and the `UnschedulablePodsTracker` controller reports the scheduling state of the
+Pods it observes for an admitted Workload in the `PodsScheduled` condition:
+
+- `PodsScheduled=False` with reason `WaitForScheduling` while at least one
+  required Pod is not scheduled.
+- `PodsScheduled=True` with reason `AllRequiredPodsScheduled` once all the
+  required Pods are scheduled or have succeeded. The condition then stays `True`
+  for the rest of the admission, even if a Pod is later deleted or fails.
+
+While `PodsScheduled` reports unscheduled Pods and the Workload has not been ready
+since its admission, the `PodsReady=False` condition carries the reason
+`WaitForScheduling` instead of `WaitForStart`.
+
+When `unschedulableTimeout` is set, such a Workload is evicted and requeued
+`unschedulableTimeout` after the tracker first observed an unscheduled required
+Pod in the current admission (the `lastTransitionTime` of the
+`PodsScheduled=False` condition), and never later than `timeout` after the
+admission. The `Evicted` condition reason is `PodsReadyTimeout`, as for the
+regular timeout, and the underlying cause is `WaitForScheduling`, both in
+`.status.schedulingStats` and in the `underlying_cause` label of the eviction
+metrics. The Workload is requeued with the same `requeuingStrategy`. Once all the
+required Pods are scheduled, the regular `timeout` measured from the admission
+still applies until the Workload is ready; after it has been ready, only
+`recoveryTimeout` applies.
+
+`unschedulableTimeout` must be positive and must not exceed `timeout`. When it is
+not set, the `PodsScheduled` condition and the `WaitForScheduling` reason are
+still reported, but unscheduled Pods are only subject to the regular `timeout`.
+
+{{% alert title="Note" color="primary" %}}
+The tracker writes a `PodsScheduled` observation for the current admission after
+it observes a live Pod, or when retained Succeeded Pods alone fill the whole
+admission. It writes no current-admission observation while neither condition
+holds, for ConcurrentAdmission Variant Workloads, or on a MultiKueue manager
+cluster for Workloads delegated to a worker cluster.
+
+The tracker observes a Pod through its `kueue.x-k8s.io/workload-slice-name` or
+`kueue.x-k8s.io/workload` annotation. Pods created before Kueue was upgraded to a
+version with this feature never carry `kueue.x-k8s.io/workload-uid`, but may
+already carry `kueue.x-k8s.io/workload` when the `TopologyAwareScheduling` or
+`SchedulerLibraryIntegration` feature gate was enabled; those Pods are observed
+and matched by Workload name. Pods carrying neither indexing annotation are not
+observed. If no current-admission observation is written, only the regular
+`timeout` applies. A condition from a previous admission may remain visible
+because its lifecycle reset is best-effort, but Kueue does not treat it as a
+current observation.
+{{% /alert %}}
 
 ### Requeuing Strategy
 

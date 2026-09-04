@@ -275,8 +275,24 @@ func IndexDeviceClassExtendedResourceName(obj client.Object) []string {
 	return []string{*dc.Spec.ExtendedResourceName}
 }
 
+type SetupOption func(*setupOptions)
+
+type setupOptions struct {
+	podWorkloadSliceNameIndex bool
+}
+
+func WithPodWorkloadSliceNameIndex() SetupOption {
+	return func(o *setupOptions) {
+		o.podWorkloadSliceNameIndex = true
+	}
+}
+
 // Setup sets the index with the given fields for core apis.
-func Setup(ctx context.Context, indexer client.FieldIndexer) error {
+func Setup(ctx context.Context, indexer client.FieldIndexer, opts ...SetupOption) error {
+	var options setupOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	if err := indexer.IndexField(ctx, &kueue.Workload{}, WorkloadQueueKey, IndexWorkloadQueue); err != nil {
 		return fmt.Errorf("setting index on queue for Workload: %w", err)
 	}
@@ -304,9 +320,7 @@ func Setup(ctx context.Context, indexer client.FieldIndexer) error {
 	if err := indexer.IndexField(ctx, &kueue.Workload{}, OwnerReferenceUID, IndexOwnerUID); err != nil {
 		return fmt.Errorf("setting index on ownerReferences.uid for Workload: %w", err)
 	}
-	// Add pod indexes for elastic-jobs and TAS. Uses workload slice name annotation to support
-	// JobSet and other workloads where pods are not immediate children of the job.
-	if features.Enabled(features.ElasticJobsViaWorkloadSlices) || features.Enabled(features.TopologyAwareScheduling) {
+	if options.podWorkloadSliceNameIndex || features.Enabled(features.ElasticJobsViaWorkloadSlices) || features.Enabled(features.TopologyAwareScheduling) {
 		if err := indexer.IndexField(ctx, &corev1.Pod{}, WorkloadSliceNameKey, IndexPodWorkloadSliceName); err != nil {
 			return fmt.Errorf("setting index on workloadSliceName for Pod: %w", err)
 		}

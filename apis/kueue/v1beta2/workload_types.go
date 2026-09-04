@@ -624,6 +624,8 @@ type WorkloadStatus struct {
 	// - Finished: the associated workload finished running (failed or succeeded).
 	// - PodsReady: at least `.spec.podSets[*].count` Pods are ready or have
 	// succeeded.
+	// - PodsScheduled: all the Pods required by the admission have been
+	// scheduled or have succeeded.
 	// conditions are limited to 16 items.
 	//
 	// +optional
@@ -995,6 +997,13 @@ const (
 	// ready or have succeeded.
 	WorkloadPodsReady = "PodsReady"
 
+	// WorkloadPodsScheduled means that all the Pods required by the admission
+	// (`.status.admission.podSetAssignments[*].count`) have been scheduled or have
+	// succeeded. The tracker writes it only while waitForPodsReady is enabled. The possible reasons
+	// are "WaitForScheduling" (status False), "AllRequiredPodsScheduled" (status True)
+	// and, after an eviction or quota release, that of the Evicted or QuotaReserved condition.
+	WorkloadPodsScheduled = "PodsScheduled"
+
 	// WorkloadEvicted means that the Workload was evicted. The possible reasons
 	// for this condition are:
 	// - "Preempted": the workload was preempted
@@ -1145,14 +1154,23 @@ const (
 	// maximum execution time.
 	WorkloadMaximumExecutionTimeExceeded = "MaximumExecutionTimeExceeded"
 
-	// WorkloadWaitForStart indicates the reason for PodsReady=False condition
-	// when the pods have not been ready since admission, or the workload is not admitted.
+	// WorkloadWaitForStart indicates PodsReady=False before readiness when no current
+	// PodsScheduled=False observation applies, or when the Workload is not admitted.
 	WorkloadWaitForStart = "WaitForStart"
 
 	// WorkloadWaitForRecovery indicates the reason for the PodsReady=False condition
 	// when the Pods were ready since the workload admission, but some pod has failed,
 	// and workload waits for recovering.
 	WorkloadWaitForRecovery = "WaitForRecovery"
+
+	// WorkloadWaitForScheduling indicates the reason for the PodsScheduled=False
+	// condition when at least one required Pod is not scheduled yet, and for the
+	// PodsReady=False condition while such a Workload has not been ready since its admission.
+	WorkloadWaitForScheduling = "WaitForScheduling"
+
+	// WorkloadAllRequiredPodsScheduled indicates the reason for the PodsScheduled=True
+	// condition when all the required Pods are scheduled or have succeeded.
+	WorkloadAllRequiredPodsScheduled = "AllRequiredPodsScheduled"
 
 	// WorkloadStarted indicates that all Pods are ready and the Workload has successfully started
 	WorkloadStarted = "Started"

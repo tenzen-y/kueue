@@ -38,10 +38,12 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/jobs/job"
 	"sigs.k8s.io/kueue/pkg/controller/tas"
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
+	"sigs.k8s.io/kueue/pkg/controller/unschedulablepods"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/metrics"
 	"sigs.k8s.io/kueue/pkg/scheduler"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
+	"sigs.k8s.io/kueue/pkg/util/waitforpodsready"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -69,6 +71,10 @@ var _ = ginkgo.AfterSuite(func() {
 })
 
 func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
+	return managerSetupWithIndexerOptions(nil, opts...)
+}
+
+func managerSetupWithIndexerOptions(indexerOpts []indexer.SetupOption, opts ...jobframework.Option) framework.ManagerSetup {
 	return func(ctx context.Context, mgr manager.Manager) {
 		integrationManager := jobcontrollers.NewIntegrationManager()
 		opts = append(opts, jobframework.WithIntegrationManager(integrationManager))
@@ -79,7 +85,7 @@ func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 			mgr.GetEventRecorder(constants.JobControllerName),
 			opts...)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = indexer.Setup(ctx, mgr.GetFieldIndexer())
+		err = indexer.Setup(ctx, mgr.GetFieldIndexer(), indexerOpts...)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = job.SetupIndexes(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -116,7 +122,12 @@ func managerAndControllersSetup(
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 		opts = append(opts, jobframework.WithCache(cCache))
-		managerSetup(opts...)(ctx, mgr)
+		trackPodsScheduled := waitforpodsready.Enabled(configuration.WaitForPodsReady)
+		var indexerOpts []indexer.SetupOption
+		if trackPodsScheduled {
+			indexerOpts = append(indexerOpts, indexer.WithPodWorkloadSliceNameIndex())
+		}
+		managerSetupWithIndexerOptions(indexerOpts, opts...)(ctx, mgr)
 
 		failedCtrl, err := core.SetupControllers(
 			mgr,
@@ -126,6 +137,11 @@ func managerAndControllersSetup(
 			core.SetupControllersOpts{PreemptionExpectations: preemptionExpectations},
 		)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
+
+		if trackPodsScheduled {
+			failedCtrl, err = unschedulablepods.NewTracker(mgr.GetClient(), nil).SetupWithManager(mgr, configuration)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
+		}
 
 		if setupTASControllers {
 			failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, configuration, nil)

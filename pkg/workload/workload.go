@@ -65,6 +65,7 @@ import (
 	utilslices "sigs.k8s.io/kueue/pkg/util/slices"
 	"sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/util/wait"
+	"sigs.k8s.io/kueue/pkg/workload/concurrentadmission"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
 	workloadfinish "sigs.k8s.io/kueue/pkg/workload/finish"
 	workloadpatching "sigs.k8s.io/kueue/pkg/workload/patching"
@@ -871,9 +872,8 @@ func SetConditionAndUpdate(ctx context.Context,
 	})
 }
 
-// UnsetQuotaReservationWithCondition sets the QuotaReserved condition to false, clears
-// the admission and set the WorkloadRequeued status.
-// Returns whether any change was done.
+const PodsNotReadyMessage = "Not all pods are ready or succeeded"
+
 func UnsetQuotaReservationWithCondition(wl *kueue.Workload, reason, message string, now time.Time) bool {
 	condition := metav1.Condition{
 		Type:               kueue.WorkloadQuotaReserved,
@@ -885,6 +885,9 @@ func UnsetQuotaReservationWithCondition(wl *kueue.Workload, reason, message stri
 	}
 	changed := apimeta.SetStatusCondition(&wl.Status.Conditions, condition)
 	if wl.Status.Admission != nil {
+		if IsAdmitted(wl) {
+			resetPodsReadyCondition(wl, now)
+		}
 		wl.Status.Admission = nil
 		changed = true
 	}
@@ -894,6 +897,26 @@ func UnsetQuotaReservationWithCondition(wl *kueue.Workload, reason, message stri
 		changed = true
 	}
 	return changed
+}
+
+// Reset here so re-admission cannot make stale readiness look like recovery.
+func resetPodsReadyCondition(wl *kueue.Workload, now time.Time) {
+	if features.Enabled(features.DisableWaitForPodsReady) ||
+		(features.Enabled(features.ConcurrentAdmission) && concurrentadmission.IsVariant(wl)) ||
+		apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPodsReady) == nil {
+		return
+	}
+	podsReady := metav1.Condition{
+		Type:               kueue.WorkloadPodsReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             kueue.WorkloadWaitForStart,
+		Message:            PodsNotReadyMessage,
+		ObservedGeneration: wl.Generation,
+		LastTransitionTime: metav1.NewTime(now),
+	}
+	if !HasConditionWithTypeAndReason(wl, &podsReady) {
+		apimeta.SetStatusCondition(&wl.Status.Conditions, podsReady)
+	}
 }
 
 // UpdateRequeueState calculate requeueAt time and update requeuingCount
@@ -1513,6 +1536,19 @@ func CreatePodsReadyCondition(status metav1.ConditionStatus, reason, message str
 		LastTransitionTime: metav1.NewTime(clock.Now()),
 		// ObservedGeneration is added via workload.SetConditionAndUpdate
 	}
+}
+
+func CurrentPodsScheduledCondition(wl *kueue.Workload, admittedAt time.Time) *metav1.Condition {
+	cond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPodsScheduled)
+	if cond == nil || !cond.LastTransitionTime.After(admittedAt) {
+		return nil
+	}
+	switch {
+	case cond.Status == metav1.ConditionFalse && cond.Reason == kueue.WorkloadWaitForScheduling,
+		cond.Status == metav1.ConditionTrue && cond.Reason == kueue.WorkloadAllRequiredPodsScheduled:
+		return cond
+	}
+	return nil
 }
 
 func FinalizeOrphanedWorkload(ctx context.Context, c client.Client, clk clock.Clock, wl *kueue.Workload, canFinish bool) error {

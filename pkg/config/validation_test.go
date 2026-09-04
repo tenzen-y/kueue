@@ -313,6 +313,97 @@ func TestValidate(t *testing.T) {
 				},
 			},
 		},
+		"negative waitForPodsReady.unschedulableTimeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: -1,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout exceeding timeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5*time.Minute + time.Second,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout equal to timeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5 * time.Minute,
+					},
+				},
+			},
+		},
+		"zero waitForPodsReady.unschedulableTimeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout:              metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
+		"positive waitForPodsReady.unschedulableTimeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					Timeout: metav1.Duration{Duration: 5 * time.Minute},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: time.Minute,
+					},
+				},
+			},
+		},
+		"waitForPodsReady.unschedulableTimeout with unspecified timeout": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				WaitForPodsReady: &configapi.WaitForPodsReady{
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: time.Minute,
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "waitForPodsReady.timeout",
+				},
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "waitForPodsReady.unschedulableTimeout",
+				},
+			},
+		},
 		"valid waitForPodsReady": {
 			cfg: &configapi.Configuration{
 				Integrations: defaultIntegrations,
@@ -322,6 +413,9 @@ func TestValidate(t *testing.T) {
 					},
 					RecoveryTimeout: &metav1.Duration{
 						Duration: 3,
+					},
+					UnschedulableTimeout: &metav1.Duration{
+						Duration: 5,
 					},
 					BlockAdmission: new(false),
 					RequeuingStrategy: &configapi.RequeuingStrategy{

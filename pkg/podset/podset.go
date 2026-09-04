@@ -157,19 +157,12 @@ func (podSetInfo *PodSetInfo) AddOrUpdateLabel(k, v string) {
 	}
 }
 
-// overrideableAnnotations returns the Kueue-owned pod template annotations
-// that Merge may overwrite instead of reporting a conflict. For elastic jobs
-// their values may legitimately change between admissions (e.g. when a new
-// slice chain starts), so overwriting is restricted to elastic flows:
-//  1. the workload-slice-name annotation, whenever the
-//     ElasticJobsViaWorkloadSlices feature is enabled, and
-//  2. the workload annotation, only for an elastic admission, identified by
-//     the workload-slice-name annotation being part of the injected info.
 func overrideableAnnotations(info PodSetInfo) []string {
+	annotations := []string{kueue.WorkloadUIDAnnotation}
 	if !features.Enabled(features.ElasticJobsViaWorkloadSlices) {
-		return nil
+		return annotations
 	}
-	annotations := []string{kueue.WorkloadSliceNameAnnotation}
+	annotations = append(annotations, kueue.WorkloadSliceNameAnnotation)
 	if _, elastic := info.Annotations[kueue.WorkloadSliceNameAnnotation]; elastic {
 		annotations = append(annotations, kueue.WorkloadAnnotation)
 	}

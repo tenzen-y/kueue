@@ -79,6 +79,10 @@ const (
 	// annotation is set when starting the Job, and removed on stopping the Job.
 	WorkloadAnnotation = "kueue.x-k8s.io/workload"
 
+	// WorkloadUIDAnnotation records the admitted Workload UID on a Job PodTemplate
+	// or gated Pod when waitForPodsReady is enabled.
+	WorkloadUIDAnnotation = "kueue.x-k8s.io/workload-uid"
+
 	// PodIndexOffsetAnnotation is an annotation on the Pod's metadata
 	// belonging to a Workload. It indicates an offset which represents starting index number
 	// within the same replica.

@@ -449,11 +449,17 @@
   type: Annotation
   example: '`kueue.x-k8s.io/workload: "my-workload-name"`'
   used_on: |
-    Kueue-managed Jobs (Job PodTemplate).
+    Kueue-managed Jobs (Job PodTemplate) and the Pods of the pod-based integrations.
   description: |
     The annotation is set on the Job's PodTemplate to indicate the name
     of the admitted [Workload](/docs/concepts/workload/) corresponding to the Job.
     The annotation is set when starting the Job, and removed on stopping the Job.
+    For the pod-based integrations it is set on the gated Pods when they are started.
+
+    The annotation is set when
+    [`waitForPodsReady`](/docs/tasks/manage/setup_wait_for_pods_ready/) is enabled,
+    or when the `TopologyAwareScheduling` or `SchedulerLibraryIntegration` feature
+    gate is enabled.
 
 - key: kueue.x-k8s.io/workload-slice-name
   type: Annotation
@@ -477,6 +483,22 @@
     of the workload slice it is intended to replace (i.e., the old slice being preempted).
 
     This annotation is alpha-level for the `ElasticJobsViaWorkloadSlices` feature gate.
+
+- key: kueue.x-k8s.io/workload-uid
+  type: Annotation
+  example: '`kueue.x-k8s.io/workload-uid: "3a1f0c6e-3c2b-4c9a-9f4e-6b0a1d2e3f45"`'
+  used_on: |
+    Kueue-managed Jobs (Job PodTemplate) and the Pods of the pod-based integrations.
+  description: |
+    The annotation is set on the Job's PodTemplate (or on the gated Pods of the
+    pod-based integrations) together with `kueue.x-k8s.io/workload` while
+    [`waitForPodsReady`](/docs/tasks/manage/setup_wait_for_pods_ready/) is enabled.
+    It carries the UID of the admitted [Workload](/docs/concepts/workload/) (for
+    elastic jobs, of the workload slice admitted when the Pod was started), so
+    that the Pods of a deleted Workload are not attributed to a re-created
+    Workload with the same name. The annotation is set when starting the Job, and
+    removed on stopping the Job. The Pods of elastic jobs and of pod groups are
+    matched to their Workload by name instead.
 
 - key: provreq.kueue.x-k8s.io/
   type: Annotation prefix

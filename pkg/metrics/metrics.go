@@ -740,6 +740,9 @@ The label 'reason' can have the following values:
 - "Deactivated" means that the workload was evicted because spec.active is set to false.
 The label 'underlying_cause' can have the following values:
 - "" means that the value in 'reason' label is the root cause for eviction.
+- "WaitForStart" means that the pods have not been ready since admission, or the workload is not admitted.
+- "WaitForRecovery" means that the Pods were ready since the workload admission, but some pod has failed.
+- "WaitForScheduling" means that the workload was evicted by the PodsReady timeout while its PodsReady condition reported WaitForScheduling (at least one required Pod was observed unscheduled).
 - "AdmissionCheck" means that the workload was evicted by Kueue due to a rejected admission check.
 - "MaximumExecutionTimeExceeded" means that the workload was evicted by Kueue due to maximum execution time exceeded.
 - "RequeuingLimitExceeded" means that the workload was evicted by Kueue due to requeuing limit exceeded.`,
@@ -769,6 +772,9 @@ The label 'reason' can have the following values:
 - "Deactivated" means that the workload was evicted because spec.active is set to false.
 The label 'underlying_cause' can have the following values:
 - "" means that the value in 'reason' label is the root cause for eviction.
+- "WaitForStart" means that the pods have not been ready since admission, or the workload is not admitted.
+- "WaitForRecovery" means that the Pods were ready since the workload admission, but some pod has failed.
+- "WaitForScheduling" means that the workload was evicted by the PodsReady timeout while its PodsReady condition reported WaitForScheduling (at least one required Pod was observed unscheduled).
 - "AdmissionCheck" means that the workload was evicted by Kueue due to a rejected admission check.
 - "MaximumExecutionTimeExceeded" means that the workload was evicted by Kueue due to maximum execution time exceeded.
 - "RequeuingLimitExceeded" means that the workload was evicted by Kueue due to requeuing limit exceeded.`,
@@ -792,6 +798,7 @@ The label 'underlying_cause' can have the following values:
 - "" means that the value in 'reason' label is the root cause for eviction.
 - "WaitForStart" means that the pods have not been ready since admission, or the workload is not admitted.
 - "WaitForRecovery" means that the Pods were ready since the workload admission, but some pod has failed.
+- "WaitForScheduling" means that the workload was evicted by the PodsReady timeout while its PodsReady condition reported WaitForScheduling (at least one required Pod was observed unscheduled).
 - "AdmissionCheck" means that the workload was evicted by Kueue due to a rejected admission check.
 - "MaximumExecutionTimeExceeded" means that the workload was evicted by Kueue due to maximum execution time exceeded.
 - "RequeuingLimitExceeded" means that the workload was evicted by Kueue due to requeuing limit exceeded.`,

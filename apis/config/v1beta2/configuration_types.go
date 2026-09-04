@@ -352,6 +352,15 @@ type WaitForPodsReady struct {
 	// Defaults to the value of timeout. Setting to "0s" disables recovery timeout checking.
 	// +optional
 	RecoveryTimeout *metav1.Duration `json:"recoveryTimeout,omitempty"`
+
+	// UnschedulableTimeout defines a timeout, measured since the transition to the
+	// PodsScheduled=False condition after a Workload is Admitted, for all the Pods
+	// required by the admission to be scheduled or to have succeeded. The deadline
+	// never exceeds timeout since the admission. After exceeding it the Workload is
+	// evicted with the PodsReadyTimeout reason and requeued after the backoff delay.
+	// Must be positive and must not exceed timeout. When unset, only timeout applies.
+	// +optional
+	UnschedulableTimeout *metav1.Duration `json:"unschedulableTimeout,omitempty"`
 }
 
 type MultiKueue struct {

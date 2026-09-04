@@ -70,6 +70,10 @@ const (
 	// annotation is set when starting the Job, and removed on stopping the Job.
 	WorkloadAnnotation = "kueue.x-k8s.io/workload"
 
+	// WorkloadUIDAnnotation records the admitted Workload UID on a Job PodTemplate
+	// or gated Pod when waitForPodsReady is enabled.
+	WorkloadUIDAnnotation = "kueue.x-k8s.io/workload-uid"
+
 	// PodGroupPodIndexLabel is a label set on the Pod's metadata belonging
 	// to a Pod group. It indicates the Pod's index within the group.
 	PodGroupPodIndexLabel = "kueue.x-k8s.io/pod-group-pod-index"

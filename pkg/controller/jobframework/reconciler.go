@@ -560,7 +560,11 @@ func (r *JobReconciler) ReconcileGenericJob(ctx context.Context, req ctrl.Reques
 	// handle a job when waitForPodsReady is enabled, and it is the main job
 	if r.waitForPodsReady {
 		log.V(3).Info("Handling a job when waitForPodsReady is enabled")
-		condition := generatePodsReadyCondition(ctx, r.client, job, wl, r.clock)
+		condition, err := generatePodsReadyCondition(ctx, r.client, job, wl, r.clock)
+		if err != nil {
+			log.Error(err, "Generating the PodsReady condition")
+			return ctrl.Result{}, err
+		}
 		if !workload.HasConditionWithTypeAndReason(wl, &condition) {
 			log.V(3).Info("Updating the PodsReady condition", "reason", condition.Reason, "status", condition.Status)
 			var prevPodsReadyReason string
@@ -1440,7 +1444,7 @@ func expectedRunningPodSets(ctx context.Context, c client.Client, wl *kueue.Work
 	if !workload.HasQuotaReservation(wl) {
 		return nil
 	}
-	info, err := getPodSetsInfoFromStatus(ctx, c, wl)
+	info, err := getPodSetsInfoFromStatus(ctx, c, wl, false)
 	if err != nil {
 		return nil
 	}
@@ -1538,7 +1542,7 @@ func (r *JobReconciler) updateWorkloadToMatchJob(ctx context.Context, job Generi
 
 // startJob will unsuspend the job, and also inject the node affinity.
 func (r *JobReconciler) startJob(ctx context.Context, job GenericJob, object client.Object, wl *kueue.Workload) error {
-	info, err := getPodSetsInfoFromStatus(ctx, r.client, wl)
+	info, err := getPodSetsInfoFromStatus(ctx, r.client, wl, r.waitForPodsReady)
 	if err != nil {
 		return err
 	}
@@ -1848,7 +1852,7 @@ func extractPriorityFromPodSets(podSets []kueue.PodSet) string {
 
 // getPodSetsInfoFromStatus extracts podSetsInfo from workload status, based on
 // admission, and admission checks.
-func getPodSetsInfoFromStatus(ctx context.Context, c client.Client, w *kueue.Workload) ([]podset.PodSetInfo, error) {
+func getPodSetsInfoFromStatus(ctx context.Context, c client.Client, w *kueue.Workload, annotateWorkload bool) ([]podset.PodSetInfo, error) {
 	if len(w.Status.Admission.PodSetAssignments) == 0 {
 		return nil, nil
 	}
@@ -1860,8 +1864,11 @@ func getPodSetsInfoFromStatus(ctx context.Context, c client.Client, w *kueue.Wor
 		if err != nil {
 			return nil, err
 		}
-		if features.Enabled(features.TopologyAwareScheduling) || features.Enabled(features.SchedulerLibraryIntegration) {
+		if annotateWorkload || features.Enabled(features.TopologyAwareScheduling) || features.Enabled(features.SchedulerLibraryIntegration) {
 			info.Annotations[kueue.WorkloadAnnotation] = w.Name
+		}
+		if annotateWorkload {
+			info.Annotations[kueue.WorkloadUIDAnnotation] = string(w.UID)
 		}
 		if workloadslicing.IsElasticWorkload(w) {
 			info.Annotations[kueue.WorkloadSliceNameAnnotation] = workloadslicing.SliceName(w)
@@ -1957,10 +1964,10 @@ func (r *JobReconciler) ignoreUnretryableError(log logr.Logger, err error) error
 	return err
 }
 
-func generatePodsReadyCondition(ctx context.Context, c client.Client, job GenericJob, wl *kueue.Workload, clock clock.Clock) metav1.Condition {
+func generatePodsReadyCondition(ctx context.Context, c client.Client, job GenericJob, wl *kueue.Workload, clock clock.Clock) (metav1.Condition, error) {
 	log := ctrl.LoggerFrom(ctx)
 	const (
-		notReadyMsg           = "Not all pods are ready or succeeded"
+		notReadyMsg           = workload.PodsNotReadyMessage
 		waitingForRecoveryMsg = "At least one pod has failed, waiting for recovery"
 		readyMsg              = "All pods reached readiness and the workload is running"
 	)
@@ -1970,7 +1977,7 @@ func generatePodsReadyCondition(ctx context.Context, c client.Client, job Generi
 		return workload.CreatePodsReadyCondition(metav1.ConditionFalse,
 			kueue.WorkloadWaitForStart,
 			notReadyMsg,
-			clock)
+			clock), nil
 	}
 
 	podsReadyCond := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPodsReady)
@@ -1987,35 +1994,49 @@ func generatePodsReadyCondition(ctx context.Context, c client.Client, job Generi
 		return workload.CreatePodsReadyCondition(metav1.ConditionTrue,
 			reason,
 			readyMsg,
-			clock)
+			clock), nil
 	}
 
 	switch {
 	case podsReadyCond == nil:
-		return workload.CreatePodsReadyCondition(metav1.ConditionFalse,
-			kueue.WorkloadWaitForStart,
-			notReadyMsg,
-			clock)
+		return initialPathCondition(ctx, c, wl, notReadyMsg, clock)
 
 	case podsReadyCond.Status == metav1.ConditionTrue:
 		return workload.CreatePodsReadyCondition(metav1.ConditionFalse,
 			kueue.WorkloadWaitForRecovery,
 			waitingForRecoveryMsg,
-			clock)
+			clock), nil
 
 	case podsReadyCond.Reason == kueue.WorkloadWaitForRecovery:
 		return workload.CreatePodsReadyCondition(metav1.ConditionFalse,
 			kueue.WorkloadWaitForRecovery,
 			waitingForRecoveryMsg,
-			clock)
+			clock), nil
 
 	default:
-		// handles both "WaitForPodsStart" and the old "PodsReady" reasons
-		return workload.CreatePodsReadyCondition(metav1.ConditionFalse,
-			kueue.WorkloadWaitForStart,
-			notReadyMsg,
-			clock)
+		return initialPathCondition(ctx, c, wl, notReadyMsg, clock)
 	}
+}
+
+func initialPathCondition(ctx context.Context, c client.Client, wl *kueue.Workload, msg string, clock clock.Clock) (metav1.Condition, error) {
+	admittedAt := apimeta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadAdmitted).LastTransitionTime.Time
+	if cur := workload.CurrentPodsScheduledCondition(wl, admittedAt); cur != nil && cur.Status == metav1.ConditionFalse {
+		delegated, err := delegatedToWorker(ctx, c, wl)
+		if err != nil {
+			return metav1.Condition{}, err
+		}
+		if !delegated {
+			return workload.CreatePodsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling, msg, clock), nil
+		}
+	}
+	return workload.CreatePodsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForStart, msg, clock), nil
+}
+
+func delegatedToWorker(ctx context.Context, c client.Client, wl *kueue.Workload) (bool, error) {
+	if !features.Enabled(features.MultiKueue) {
+		return false, nil
+	}
+	return admissioncheck.ShouldSkipLocalExecution(ctx, c, wl)
 }
 
 // GetPodSetsInfoFromWorkload retrieve the podSetsInfo slice from the

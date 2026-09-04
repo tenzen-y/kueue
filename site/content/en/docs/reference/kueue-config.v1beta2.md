@@ -1622,6 +1622,18 @@ and requeued after the backoff delay.
 Defaults to the value of timeout. Setting to &quot;0s&quot; disables recovery timeout checking.</p>
 </td>
 </tr>
+<tr><td><code>unschedulableTimeout</code><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.Duration</code></a>
+</td>
+<td>
+   <p>UnschedulableTimeout defines a timeout, measured since the transition to the
+PodsScheduled=False condition after a Workload is Admitted, for all the Pods
+required by the admission to be scheduled or to have succeeded. The deadline
+never exceeds timeout since the admission. After exceeding it the Workload is
+evicted with the PodsReadyTimeout reason and requeued after the backoff delay.
+Must be positive and must not exceed timeout. When unset, only timeout applies.</p>
+</td>
+</tr>
 </tbody>
 </table>
 

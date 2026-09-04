@@ -479,6 +479,63 @@ func TestMergeRestore(t *testing.T) {
 			},
 			wantError: true,
 		},
+		"updated workload uid annotation": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: true},
+			podSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "old-uid",
+				}).
+				Obj(),
+			info: PodSetInfo{
+				Annotations: map[string]string{
+					kueue.WorkloadUIDAnnotation: "new-uid",
+				},
+			},
+			wantPodSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "new-uid",
+				}).
+				Obj(),
+			wantRestoreChanges: true,
+		},
+		"updated workload uid annotation; feature disabled": {
+			featureGates: map[featuregate.Feature]bool{features.ElasticJobsViaWorkloadSlices: false},
+			podSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "old-uid",
+				}).
+				Obj(),
+			info: PodSetInfo{
+				Annotations: map[string]string{
+					kueue.WorkloadUIDAnnotation: "new-uid",
+				},
+			},
+			wantPodSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "new-uid",
+				}).
+				Obj(),
+			wantRestoreChanges: true,
+		},
+		"workload uid annotation on the template; info without it": {
+			podSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "old-uid",
+				}).
+				Obj(),
+			info: PodSetInfo{
+				Annotations: map[string]string{
+					"a1": "a1v",
+				},
+			},
+			wantPodSet: utiltestingapi.MakePodSet("", 1).
+				Annotations(map[string]string{
+					kueue.WorkloadUIDAnnotation: "old-uid",
+					"a1":                        "a1v",
+				}).
+				Obj(),
+			wantRestoreChanges: true,
+		},
 		"conflicting node selector": {
 			podSet: basePodSet.DeepCopy(),
 			info: PodSetInfo{

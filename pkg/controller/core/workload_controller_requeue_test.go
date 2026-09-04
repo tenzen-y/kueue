@@ -23,10 +23,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/featuregate"
 	testingclock "k8s.io/utils/clock/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	"sigs.k8s.io/kueue/pkg/features"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 )
@@ -36,6 +39,65 @@ func TestReconcileRequeue(t *testing.T) {
 	// use the current time trimmed.
 	now := time.Now().Truncate(time.Second)
 	fakeClock := testingclock.NewFakeClock(now)
+
+	admittedWithUnscheduledPod := func() *utiltestingapi.WorkloadWrapper {
+		return utiltestingapi.MakeWorkload("wl", "ns").
+			ReserveQuotaAt(utiltestingapi.MakeAdmission("q1").Obj(), now).
+			Condition(metav1.Condition{
+				Type:               kueue.WorkloadAdmitted,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Minute)),
+				Reason:             "ByTest",
+				Message:            "Admitted by ClusterQueue q1",
+			}).
+			AdmittedAt(true, now).
+			Condition(metav1.Condition{
+				Type:               kueue.WorkloadPodsScheduled,
+				Status:             metav1.ConditionFalse,
+				Reason:             kueue.WorkloadWaitForScheduling,
+				Message:            "At least one required pod is not scheduled",
+				LastTransitionTime: metav1.NewTime(now.Add(-4 * time.Minute)),
+				ObservedGeneration: 1,
+			}).
+			Generation(1)
+	}
+	podsReadyCondition := func(status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{
+			Type:               kueue.WorkloadPodsReady,
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.NewTime(now.Add(-4 * time.Minute)),
+		}
+	}
+	waitForPodsReadyWithUnschedulableTimeout := func(timeout time.Duration) Option {
+		return WithWaitForPodsReady(&waitForPodsReadyConfig{
+			timeout:                     timeout,
+			unschedulableTimeout:        new(3 * time.Second),
+			requeuingBackoffLimitCount:  new(int32(100)),
+			requeuingBackoffBaseSeconds: 10,
+			requeuingBackoffJitter:      0,
+			requeuingBackoffMaxDuration: time.Duration(3600) * time.Second,
+		})
+	}
+	multiKueueCheck := kueue.AdmissionCheckState{Name: "multikueue", State: kueue.CheckStateReady}
+	multiKueueAdmissionCheck := func() *kueue.AdmissionCheck {
+		return utiltestingapi.MakeAdmissionCheck(string(multiKueueCheck.Name)).ControllerName(kueue.MultiKueueControllerName).Obj()
+	}
+	evictedByPodsReadyTimeout := metav1.Condition{
+		Type:               kueue.WorkloadEvicted,
+		Status:             metav1.ConditionTrue,
+		Reason:             kueue.WorkloadEvictedByPodsReadyTimeout,
+		Message:            "Exceeded the PodsReady timeout ns/wl",
+		ObservedGeneration: 1,
+	}
+	evictedByPodsReadyTimeoutEvents := []utiltesting.EventRecord{
+		{
+			Key:       types.NamespacedName{Name: "wl", Namespace: "ns"},
+			EventType: corev1.EventTypeNormal,
+			Reason:    "EvictedDueToPodsReadyTimeout",
+			Message:   "Exceeded the PodsReady timeout ns/wl",
+		},
+	}
 
 	cases := map[string]reconcileTestCase{
 		"increment re-queue count": {
@@ -121,6 +183,152 @@ func TestReconcileRequeue(t *testing.T) {
 					Message:   "Exceeded the PodsReady timeout ns/wl",
 				},
 			},
+		},
+		"evict with the WaitForScheduling cause when the unschedulableTimeout is exceeded": {
+			reconcilerOpts: []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				Condition(evictedByPodsReadyTimeout).
+				RequeueState(new(int32(1)), new(metav1.NewTime(now.Add(10*time.Second).Truncate(time.Second)))).
+				SchedulingStatsEviction(
+					kueue.WorkloadSchedulingStatsEviction{
+						Reason:          kueue.WorkloadEvictedByPodsReadyTimeout,
+						UnderlyingCause: kueue.WorkloadWaitForScheduling,
+						Count:           1,
+					},
+				).
+				Obj(),
+			wantEvents: evictedByPodsReadyTimeoutEvents,
+		},
+		"keep a workload delegated to a MultiKueue worker until the timeout is exceeded": {
+			featureGates:      map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:    []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			additionalObjects: []client.Object{multiKueueAdmissionCheck()},
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantResult:             reconcile.Result{RequeueAfter: 25 * time.Minute},
+			wantAdmissionCheckGets: new(1),
+		},
+		"evict a workload delegated to a MultiKueue worker with the WaitForStart cause when the timeout is exceeded": {
+			featureGates:      map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:    []Option{waitForPodsReadyWithUnschedulableTimeout(3 * time.Second)},
+			additionalObjects: []client.Object{multiKueueAdmissionCheck()},
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(kueue.AdmissionCheckState{
+					Name:    multiKueueCheck.Name,
+					State:   kueue.CheckStatePending,
+					Message: "Reset to Pending after eviction. Previously: Ready",
+				}).
+				Condition(evictedByPodsReadyTimeout).
+				RequeueState(new(int32(1)), new(metav1.NewTime(now.Add(10*time.Second).Truncate(time.Second)))).
+				SchedulingStatsEviction(
+					kueue.WorkloadSchedulingStatsEviction{
+						Reason:          kueue.WorkloadEvictedByPodsReadyTimeout,
+						UnderlyingCause: kueue.WorkloadWaitForStart,
+						Count:           1,
+					},
+				).
+				Obj(),
+			wantEvents: evictedByPodsReadyTimeoutEvents,
+		},
+		"fail when the MultiKueue AdmissionCheck lookup fails": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:       []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantError:              errTest,
+			wantAdmissionCheckGets: new(1),
+		},
+		"skip the MultiKueue AdmissionCheck lookup when PodsReady is WaitForStart": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:       []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForStart)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForStart)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantResult:             reconcile.Result{RequeueAfter: 25 * time.Minute},
+			wantAdmissionCheckGets: new(0),
+		},
+		"skip the MultiKueue AdmissionCheck lookup when PodsReady is absent": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:       []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantResult:             reconcile.Result{RequeueAfter: 25 * time.Minute},
+			wantAdmissionCheckGets: new(0),
+		},
+		"skip the MultiKueue AdmissionCheck lookup when PodsReady is True": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:       []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionTrue, kueue.WorkloadStarted)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionTrue, kueue.WorkloadStarted)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantAdmissionCheckGets: new(0),
+		},
+		"skip the MultiKueue AdmissionCheck lookup when waitForPodsReady is disabled": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantWorkload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(multiKueueCheck).
+				Obj(),
+			wantAdmissionCheckGets: new(0),
+		},
+		"skip the MultiKueue AdmissionCheck lookup when the workload is not admitted": {
+			featureGates:         map[featuregate.Feature]bool{features.MultiKueue: true},
+			reconcilerOpts:       []Option{waitForPodsReadyWithUnschedulableTimeout(30 * time.Minute)},
+			additionalObjects:    []client.Object{multiKueueAdmissionCheck()},
+			admissionCheckGetErr: errTest,
+			workload: admittedWithUnscheduledPod().
+				Condition(podsReadyCondition(metav1.ConditionFalse, kueue.WorkloadWaitForScheduling)).
+				AdmissionCheck(kueue.AdmissionCheckState{
+					Name:  multiKueueCheck.Name,
+					State: kueue.CheckStatePending,
+				}).
+				AdmittedAt(false, now).
+				Obj(),
+			wantAdmissionCheckGets: new(0),
 		},
 		"wait time should be limited to backoffMaxSeconds": {
 			reconcilerOpts: []Option{

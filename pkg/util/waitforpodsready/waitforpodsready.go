@@ -27,3 +27,7 @@ func Enabled(cfg *configapi.WaitForPodsReady) bool {
 	}
 	return cfg != nil
 }
+
+func UnschedulableTimeoutEnabled(cfg *configapi.WaitForPodsReady) bool {
+	return Enabled(cfg) && cfg.UnschedulableTimeout != nil && cfg.UnschedulableTimeout.Duration > 0
+}
