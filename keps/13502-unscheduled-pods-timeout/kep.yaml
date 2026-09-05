@@ -1,15 +1,14 @@
 title: Unscheduled Pods Timeout
 kep-number: 13502
 authors:
+  - "@tenzen-y"
   - "@vibhordubey333"
 status: implementable
-creation-date: 2026-07-27
+creation-date: 2026-09-07
 reviewers:
   - "@mimowo"
-  - "@tenzen-y"
 approvers:
   - "@mimowo"
-  - "@tenzen-y"
 
 see-also:
   - "/keps/349-all-or-nothing"
@@ -17,17 +16,15 @@ see-also:
   - "/keps/2724-topology-aware-scheduling"
   - "/keps/8691-concurrent-admission"
 
-stage: beta
+stage: alpha
 
 latest-milestone: "v0.20"
 
 milestone:
-  beta: "v0.20"
+  alpha: "v0.20"
 
-feature-gates: []
+feature-gates:
+  - name: WaitForPodsReadyUnschedulableTimeout
 disable-supported: true
 
-metrics:
-  - kueue_evicted_workloads_once_total
-  - kueue_evicted_workloads_total
-  - kueue_local_queue_evicted_workloads_total
+metrics: []
