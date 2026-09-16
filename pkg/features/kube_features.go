@@ -748,6 +748,14 @@ const (
 	// group reports PodsReady=False as soon as any member finishes, which can evict a
 	// healthy group once waitForPodsReady.recoveryTimeout elapses.
 	PodIntegrationCountSucceededPodsAsReady featuregate.Feature = "PodIntegrationCountSucceededPodsAsReady"
+
+	// owner: @pajakd
+	//
+	// Allow a PodSet slice size that does not evenly divide the PodSet count.
+	// The trailing pods form one incomplete slice, which is placed in a single
+	// topology domain just like a full slice. Without this gate the trailing
+	// pods are dropped from the assignment.
+	TASPartialSlices featuregate.Feature = "TASPartialSlices"
 )
 
 func init() {
@@ -782,6 +790,7 @@ var defaultFeatureGateDependencies = map[featuregate.Feature][]featuregate.Featu
 	MultiKueueReuseClientConnectionConfigForWorkers: {MultiKueue},
 	TASTopologySpreading:                            {TopologyAwareScheduling},
 	AdmissionFairSharingAnchorAtQuotaReservation:    {AdmissionFairSharing},
+	TASPartialSlices:                                {TopologyAwareScheduling},
 }
 
 // defaultVersionedFeatureGates consists of all known Kueue-specific feature keys.
@@ -1151,6 +1160,10 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 
 	PodIntegrationCountSucceededPodsAsReady: {
+		{Version: version.MustParse("0.20"), Default: true, PreRelease: featuregate.Beta},
+	},
+
+	TASPartialSlices: {
 		{Version: version.MustParse("0.20"), Default: true, PreRelease: featuregate.Beta},
 	},
 }
