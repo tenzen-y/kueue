@@ -5292,6 +5292,81 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 						}, util.Timeout, util.Interval).Should(gomega.Succeed())
 					})
 				})
+
+				ginkgo.It("replaces failed node for workload with a partial slice", func() {
+					node3 := testingnode.MakeNode("x3").
+						Label("node-group", "tas").
+						Label(utiltesting.DefaultBlockTopologyLevel, "b1").
+						Label(utiltesting.DefaultRackTopologyLevel, "r1").
+						Label(corev1.LabelHostname, "x3").
+						StatusAllocatable(corev1.ResourceList{
+							"nvidia.com/gpu":      resource.MustParse("12"),
+							corev1.ResourceCPU:    resource.MustParse("1"),
+							corev1.ResourceMemory: resource.MustParse("1Gi"),
+							corev1.ResourcePods:   resource.MustParse("20"),
+						}).
+						Ready().
+						Obj()
+					util.CreateNodesWithStatus(ctx, k8sClient, []corev1.Node{*node3})
+					ginkgo.DeferCleanup(func() {
+						util.ExpectObjectToBeDeleted(ctx, k8sClient, node3, true)
+					})
+
+					var wl *kueue.Workload
+					ginkgo.By("creating and admitting a slice-topology workload with partial slice", func() {
+						wl = utiltestingapi.MakeWorkload("wl-replace-partial", ns.Name).
+							PodSets(*utiltestingapi.MakePodSet("worker", 3).
+								PreferredTopologyRequest(utiltesting.DefaultRackTopologyLevel).
+								SliceRequiredTopologyRequest(corev1.LabelHostname).
+								SliceSizeTopologyRequest(2).
+								Obj()).
+							Queue(kueue.LocalQueueName(localQueue.Name)).
+							Request("nvidia.com/gpu", "1").
+							Obj()
+						util.MustCreate(ctx, k8sClient, wl)
+						util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, wl)
+					})
+
+					gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).To(gomega.Succeed())
+					psa := wl.Status.Admission.PodSetAssignments[0]
+					gomega.Expect(psa.TopologyAssignment).NotTo(gomega.BeNil())
+					gomega.Expect(assignedPodCount(psa.TopologyAssignment)).To(gomega.Equal(int32(3)))
+
+					assigned := utiltas.InternalFrom(psa.TopologyAssignment)
+					var failedNodeName string
+					for _, d := range assigned.Domains {
+						if d.Count == 1 {
+							failedNodeName = d.Values[0]
+							break
+						}
+					}
+					if failedNodeName == "" {
+						failedNodeName = assigned.Domains[0].Values[0]
+					}
+
+					ginkgo.By("marking node "+failedNodeName+" NotReady", func() {
+						nodeToUpdate := &corev1.Node{}
+						gomega.Expect(k8sClient.Get(ctx, apitypes.NamespacedName{Name: failedNodeName}, nodeToUpdate)).Should(gomega.Succeed())
+						util.SetNodeCondition(ctx, k8sClient, nodeToUpdate, &corev1.NodeCondition{
+							Type:               corev1.NodeReady,
+							Status:             corev1.ConditionFalse,
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-tas.NodeFailureDelay)),
+						})
+					})
+
+					ginkgo.By("verifying the failed node is replaced and UnhealthyNodes is cleared", func() {
+						gomega.Eventually(func(g gomega.Gomega) {
+							g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).To(gomega.Succeed())
+							g.Expect(wl.Status.UnhealthyNodes).NotTo(gomega.ContainElement(kueue.UnhealthyNode{Name: failedNodeName}))
+							newSum := assignedPodCount(wl.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+							g.Expect(newSum).To(gomega.Equal(int32(3)))
+							newAssigned := utiltas.InternalFrom(wl.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+							for _, d := range newAssigned.Domains {
+								g.Expect(d.Values[0]).NotTo(gomega.Equal(failedNodeName))
+							}
+						}, util.Timeout, util.Interval).Should(gomega.Succeed())
+					})
+				})
 			})
 		})
 		ginkgo.When("Preemption is enabled within ClusterQueue", func() {

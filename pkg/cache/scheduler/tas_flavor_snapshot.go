@@ -983,14 +983,6 @@ func (s *TASFlavorSnapshot) findReplacementAssignment(
 	if reason != "" {
 		return nil, nil, reason
 	}
-	// TODO: repair an assignment that holds a partial slice in place.
-	// Until then the merge below could split it across domains, which the
-	// rank-based ungating relies on not happening, so the Workload is
-	// rescheduled from scratch instead.
-	if features.Enabled(features.TASPartialSlices) && slicesRequested(tr.PodSet.TopologyRequest) &&
-		(utiltas.CountPodsInAssignment(existingAssignment)+tr.Count)%sliceSize != 0 {
-		return nil, nil, fmt.Sprintf("cannot replace the node %v in an assignment that holds a partial PodSet slice", wl.Obj.Status.UnhealthyNodes[0].Name)
-	}
 	if slicesRequested(tr.PodSet.TopologyRequest) && requiredReplacementDomain != "" && (tr.Count%sliceSize != 0) {
 		trCopy.PodSet = tr.PodSet.DeepCopy()
 		// Find the innermost constraint whose size divides the number of replacement
@@ -1021,6 +1013,15 @@ func (s *TASFlavorSnapshot) findReplacementAssignment(
 		return nil, nil, fmt.Sprintf("cannot find replacement assignment for unhealthy node: %v", wl.Obj.Status.UnhealthyNodes[0].Name)
 	}
 	newAssignment := s.mergeTopologyAssignments(replacementAssignment[tr.PodSet.Name], existingAssignment)
+	// Merging orders the domains by their level values, which may leave the
+	// partial slice somewhere other than last.
+	s.normalizeTailLast(newAssignment, tr.PodSet.TopologyRequest, sliceSize)
+	if !s.assignmentSliceAligned(newAssignment, tr.PodSet.TopologyRequest, sliceSize) {
+		// The repair could not keep the slices whole, which the rank-based
+		// ungating relies on. Reject it and let the workload be rescheduled
+		// from scratch instead of publishing a misaligned assignment.
+		return nil, nil, fmt.Sprintf("cannot replace the node %v without splitting a PodSet slice", wl.Obj.Status.UnhealthyNodes[0].Name)
+	}
 	return newAssignment, replacementAssignment[tr.PodSet.Name], ""
 }
 
@@ -1233,9 +1234,14 @@ func (s *TASFlavorSnapshot) sliceLevelUsages(ta *utiltas.TopologyAssignment, sli
 // incomplete slice, so that the replacement pods can be confined to it.
 //
 // A healthy assignment holds a multiple of sliceSize pods in every domain at
-// the slice level. A single unhealthy node perturbs exactly one domain, so the
-// damaged one is the domain whose pod count the missing pods restore to a whole
-// number of slices.
+// the slice level, except that with partial slices enabled the last domain may
+// hold the trailing pods. A single unhealthy node perturbs exactly one domain,
+// so the damaged one is the domain whose pod count is restored to its expected
+// residue by the missing pods.
+//
+// The match is unique: an undamaged domain already holds its expected residue,
+// so it could only match if missingCount were a multiple of sliceSize, and the
+// callers only reach this function when it is not.
 func (s *TASFlavorSnapshot) findIncompleteSliceDomain(ta *utiltas.TopologyAssignment, missingCount int32, sliceSize int32, topologyKey string) utiltas.TopologyDomainID {
 	// this function assumes that all assignments are at the hostname level
 	sliceLevelIdx, found := s.resolveLevelIdx(topologyKey)
@@ -1243,8 +1249,29 @@ func (s *TASFlavorSnapshot) findIncompleteSliceDomain(ta *utiltas.TopologyAssign
 		return ""
 	}
 
-	for _, usage := range s.sliceLevelUsages(ta, sliceLevelIdx) {
-		if (usage.count+missingCount)%sliceSize == 0 {
+	usages := s.sliceLevelUsages(ta, sliceLevelIdx)
+
+	// The PodSet count is recovered from the assignment itself rather than read
+	// from the PodSet, whose count may have moved on, e.g. for elastic jobs.
+	total := missingCount
+	for _, usage := range usages {
+		total += usage.count
+	}
+	tailResidue := int32(0)
+	if features.Enabled(features.TASPartialSlices) {
+		tailResidue = total % sliceSize
+	}
+
+	for i, usage := range usages {
+		expected := int32(0)
+		if i == len(usages)-1 {
+			// Only the last domain may hold a partial slice. When the
+			// domain that held it lost all of its pods, this is the domain
+			// that takes over as the last one, and confining the replacement
+			// to it restores the invariant.
+			expected = tailResidue
+		}
+		if (usage.count+missingCount)%sliceSize == expected {
 			return usage.domainID
 		}
 	}

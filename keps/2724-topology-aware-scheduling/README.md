@@ -1015,11 +1015,14 @@ physically co-located. Domains are otherwise ordered by their level values, whic
 says nothing about where the partial slice ends up, so the order is corrected
 before the assignment is published. Which domain holds the partial slice is
 recomputed from the assignment rather than remembered, which makes the correction
-idempotent.
+idempotent and stable across the merges done to repair an assignment.
 
-Replacing a failed node under an assignment that holds a partial slice is
-not supported yet: the replacement is declined and the Workload is rescheduled
-from scratch. Repairing such an assignment in place is left as follow-up work.
+The same invariant lets failed-node replacement tell a damaged slice apart from
+the partial one. Every domain at the slice level holds a multiple of the slice
+size, except the last, which holds the remainder. A single unhealthy node
+perturbs exactly one domain, so the damaged domain is the one whose pod count is
+restored to its expected residue by the missing pods. A replacement that cannot
+keep the slices whole is rejected, and the Workload is rescheduled from scratch.
 
 Partial slices are supported for a single slice layer only: the inner layers
 of `kueue.x-k8s.io/podset-slice-required-topology-constraints` subdivide a slice
