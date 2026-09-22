@@ -18,6 +18,7 @@ package scheduler
 
 import (
 	"math"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -459,47 +460,24 @@ func (s *TASFlavorSnapshot) normalizeTailLast(ta *utiltas.TopologyAssignment, tr
 	if !found {
 		return
 	}
-	total := int32(0)
-	for _, domainFromAssignment := range ta.Domains {
-		total += domainFromAssignment.Count
-	}
 	remainder := utiltas.CountPodsInAssignment(ta) % sliceSize
 	if remainder == 0 {
 		return
 	}
 
-	// A domain at the slice level may be spread over several entries of the
-	// assignment, so the entries are grouped before their counts are compared.
-	sliceLevelIDs := make([]utiltas.TopologyDomainID, len(ta.Domains))
-	countPerSliceLevelDomain := make(map[utiltas.TopologyDomainID]int32, len(ta.Domains))
-	for i, domainFromAssignment := range ta.Domains {
-		domain := s.sliceLevelDomain(ta.Levels, domainFromAssignment.Values, sliceLevelIdx)
-		if domain == nil {
-			// Defensive: the assignment does not reach the slice level.
-			return
-		}
-		sliceLevelIDs[i] = domain.id
-		countPerSliceLevelDomain[domain.id] += domainFromAssignment.Count
-	}
-
-	tailDomainID, found := utiltas.TopologyDomainID(""), false
-	for _, id := range sliceLevelIDs {
-		if countPerSliceLevelDomain[id]%sliceSize == remainder {
-			tailDomainID, found = id, true
-			break
-		}
-	}
-	if !found {
-		// Defensive: no domain holds the trailing pods on their own, so there is
-		// no ordering that keeps the slices whole. assignmentSliceAligned
-		// reports this to the caller.
+	usages := s.sliceLevelUsages(ta, sliceLevelIdx)
+	tailIdx := slices.IndexFunc(usages, func(u sliceLevelUsage) bool {
+		return u.count%sliceSize == remainder
+	})
+	if tailIdx < 0 || tailIdx == len(usages)-1 {
 		return
 	}
-
+	tailDomainID := usages[tailIdx].domainID
 	head := make([]utiltas.TopologyDomainAssignment, 0, len(ta.Domains))
 	tail := make([]utiltas.TopologyDomainAssignment, 0, len(ta.Domains))
-	for i, domainFromAssignment := range ta.Domains {
-		if sliceLevelIDs[i] == tailDomainID {
+	for _, domainFromAssignment := range ta.Domains {
+		domain := s.sliceLevelDomain(ta.Levels, domainFromAssignment.Values, sliceLevelIdx)
+		if domain != nil && domain.id == tailDomainID {
 			tail = append(tail, domainFromAssignment)
 		} else {
 			head = append(head, domainFromAssignment)
