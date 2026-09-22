@@ -463,7 +463,7 @@ func (s *TASFlavorSnapshot) normalizeTailLast(ta *utiltas.TopologyAssignment, tr
 	for _, domainFromAssignment := range ta.Domains {
 		total += domainFromAssignment.Count
 	}
-	remainder := total % sliceSize
+	remainder := utiltas.CountPodsInAssignment(ta) % sliceSize
 	if remainder == 0 {
 		return
 	}
