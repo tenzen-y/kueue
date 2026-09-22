@@ -81,12 +81,12 @@ type domainState struct {
 	leaderCount          int32
 
 	// sliceCountWithTail is the number of whole slices that fit in the domain
-	// when it also holds the incomplete slice of a PodSet whose count is not a
-	// multiple of the slice size, and noTailFit when the incomplete slice does
+	// when it also holds the partial slice of a PodSet whose count is not a
+	// multiple of the slice size, and noTailFit when the partial slice does
 	// not fit in it at all. sliceCountWithLeaderAndTail additionally reserves
 	// room for the leader.
 	//
-	// Both are only computed when the PodSet has an incomplete slice, and are
+	// Both are only computed when the PodSet has a partial slice, and are
 	// left at their zero value otherwise; see tas_partial_slices.go.
 	sliceCountWithTail          int32
 	sliceCountWithLeaderAndTail int32
@@ -691,13 +691,13 @@ type leaderRequirements struct {
 // It is passed to the placement helpers as a single value rather than as a
 // loose int32, so that it cannot be transposed with the neighbouring counts and
 // so that the figures describing the cut stay together. The two always travel
-// together: every capacity that accounts for the incomplete slice is expressed
+// together: every capacity that accounts for the partial slice is expressed
 // in whole slices of size, with tailSize pods charged on top.
 type sliceShape struct {
 	// size is the number of pods in a whole slice. It is 1 when slices are not
-	// requested, in which case there is no incomplete slice either.
+	// requested, in which case there is no partial slice either.
 	size int32
-	// tailSize is the number of pods in the incomplete slice, that is
+	// tailSize is the number of pods in the partial slice, that is
 	// count % size. It is zero when the count divides evenly into whole
 	// slices, and whenever the feature is disabled.
 	tailSize int32
@@ -710,9 +710,9 @@ type topologyAssignmentParameters struct {
 	sliceSize        int32
 	// count is the number of pods to place.
 	count int32
-	// tailSize is the number of pods in the incomplete slice, that is
+	// tailSize is the number of pods in the partial slice, that is
 	// count % sliceSize. It is zero when the count divides evenly into whole
-	// slices. The placement algorithm treats the incomplete slice as a slice
+	// slices. The placement algorithm treats the partial slice as a slice
 	// that has to be held by a single domain like any other, and charges the
 	// domain holding it for tailSize pods rather than for a whole slice.
 	tailSize              int32
@@ -983,13 +983,13 @@ func (s *TASFlavorSnapshot) findReplacementAssignment(
 	if reason != "" {
 		return nil, nil, reason
 	}
-	// TODO: repair an assignment that holds an incomplete slice in place.
+	// TODO: repair an assignment that holds a partial slice in place.
 	// Until then the merge below could split it across domains, which the
 	// rank-based ungating relies on not happening, so the Workload is
 	// rescheduled from scratch instead.
 	if features.Enabled(features.TASPartialSlices) && slicesRequested(tr.PodSet.TopologyRequest) &&
 		(utiltas.CountPodsInAssignment(existingAssignment)+tr.Count)%sliceSize != 0 {
-		return nil, nil, fmt.Sprintf("cannot replace the node %v in an assignment that holds an incomplete PodSet slice", wl.Obj.Status.UnhealthyNodes[0].Name)
+		return nil, nil, fmt.Sprintf("cannot replace the node %v in an assignment that holds a partial PodSet slice", wl.Obj.Status.UnhealthyNodes[0].Name)
 	}
 	if slicesRequested(tr.PodSet.TopologyRequest) && requiredReplacementDomain != "" && (tr.Count%sliceSize != 0) {
 		trCopy.PodSet = tr.PodSet.DeepCopy()
@@ -1398,9 +1398,9 @@ func (s *TASFlavorSnapshot) findTopologyAssignment(
 	var fitLevelIdx int
 	var useBalancedPlacement bool
 
-	// TODO: teach balanced placement about the incomplete slice. It
+	// TODO: teach balanced placement about the partial slice. It
 	// distributes whole slices only, so until then a PodSet that has one falls
-	// back to the default path below, which places the incomplete slice for
+	// back to the default path below, which places the partial slice for
 	// what it is.
 	if features.Enabled(features.TASBalancedPlacement) && !state.required && !state.unconstrained && !state.shape().hasTail() {
 		var bestThreshold int32
@@ -1470,9 +1470,9 @@ func (s *TASFlavorSnapshot) findTopologyAssignment(
 			}
 
 			domainState := s.domainStateOf(domain)
-			// The pod count of a domain holding the incomplete slice is not a
+			// The pod count of a domain holding the partial slice is not a
 			// multiple of the slice size, and the pods below the slice level
-			// are distributed one by one, so the incomplete slice needs no
+			// are distributed one by one, so the partial slice needs no
 			// further tracking here.
 			addCurrFitDomain := s.updateCountsToMinimumGeneric(
 				sortedLowerDomains,
@@ -1517,15 +1517,15 @@ func (s *TASFlavorSnapshot) findTopologyAssignment(
 	if state.tailSize > 0 {
 		workerAssignment := assignments[workerPodSetName]
 		topologyRequest := workersTasPodSetRequests.PodSet.TopologyRequest
-		// The incomplete slice may have landed in any of the domains, while the
+		// The partial slice may have landed in any of the domains, while the
 		// ungater expects it last in the published order.
 		s.normalizeTailLast(workerAssignment, topologyRequest, state.sliceSize)
 		if utiltas.CountPodsInAssignment(workerAssignment) != state.count || !s.assignmentSliceAligned(workerAssignment, topologyRequest, state.sliceSize) {
-			// Defensive: the domains were selected knowing where the incomplete
+			// Defensive: the domains were selected knowing where the partial
 			// slice would go, so this means the descent disagreed with that
 			// choice. Reject the placement rather than publish an assignment
 			// the ungater would read as splitting a slice across domains.
-			return nil, nil, fmt.Sprintf("cannot place the incomplete slice of PodSet %s in a single topology domain", workerPodSetName)
+			return nil, nil, fmt.Sprintf("cannot place the partial slice of PodSet %s in a single topology domain", workerPodSetName)
 		}
 	}
 
@@ -1765,11 +1765,11 @@ func (s *TASFlavorSnapshot) findBestFitDomainBy(domains []*domain, needed int32,
 // above the searched level that can accommodate the requested slices and
 // leaders.
 //
-// A PodSet whose count is not a multiple of the slice size also has an
-// incomplete slice to place. It is not counted among the whole slices; instead
+// A PodSet whose count is not a multiple of the slice size also has a
+// partial slice to place. It is not counted among the whole slices; instead
 // the capacity of a domain is read as the number of whole slices it holds while
-// it also holds the incomplete one, so that a set of domains is only selected
-// when the incomplete slice has a home inside it.
+// it also holds the partial one, so that a set of domains is only selected
+// when the partial slice has a home inside it.
 func (s *TASFlavorSnapshot) findLevelWithFitDomains(
 	searchLevelIdx int,
 	state *findTopologyAssignmentState,
@@ -1856,7 +1856,7 @@ func (s *TASFlavorSnapshot) findLevelWithFitDomains(
 		}
 		results := []*domain{}
 		// assignedSlices[i] is what results[i] is expected to take, which the
-		// incomplete slice has to fit next to.
+		// partial slice has to fit next to.
 		assignedSlices := []int32{}
 		takesLeader := []bool{}
 		remainingSliceCount := sliceCount
@@ -1906,15 +1906,15 @@ func (s *TASFlavorSnapshot) findLevelWithFitDomains(
 			return 0, nil, notFitReason(sliceCount-remainingSliceCount, requestedSliceCount)
 		}
 		if hasTail && !s.selectionHoldsTail(results, assignedSlices, takesLeader) {
-			// None of the selected domains has room for the incomplete slice
+			// None of the selected domains has room for the partial slice
 			// next to the whole ones, so the set has to be widened by a domain
 			// that can hold it. Every domain is a candidate, not only those
 			// past the last one visited: best fit takes the closing domain out
 			// of order, leaving earlier ones unused.
 			//
-			// One of them is always able to hold the incomplete slice when a
+			// One of them is always able to hold the partial slice when a
 			// placement exists at all. A domain holding a whole slice holds the
-			// incomplete one too, since that is smaller, so the greedy above
+			// partial one too, since that is smaller, so the greedy above
 			// leaves a domain out only when the slices it holds are not needed.
 			extra := s.firstDomainHostingTail(sortedDomain, results)
 			if extra == nil {
@@ -2018,9 +2018,9 @@ func (s *TASFlavorSnapshot) consumeWithLeadersGeneric(
 // That summary subtracts the smallest eligible child leader penalty, so descent
 // must select a leader-capable domain whose penalty fits within the available slack.
 //
-// When the shape has an incomplete slice, the summary subtracts the cost of
-// holding the leader and the incomplete slice together, so the two are costed
-// together here as well: a domain that is the only home left for the incomplete
+// When the shape has a partial slice, the summary subtracts the cost of
+// holding the leader and the partial slice together, so the two are costed
+// together here as well: a domain that is the only home left for the partial
 // slice is not given the leader.
 func (s *TASFlavorSnapshot) prioritizeLeaderDomain(domains []*domain, count, leaderCount int32, shape sliceShape, slicesEnabled bool) []*domain {
 	if leaderCount == 0 || len(domains) < 2 {
@@ -2080,7 +2080,7 @@ func (s *TASFlavorSnapshot) prioritizeLeaderDomain(domains []*domain, count, lea
 // updateCountsToMinimumGeneric distributes count over the domains, in whole
 // slices or in single pods, and returns the domains it used.
 //
-// The shape's incomplete slice is placed alongside the whole ones. It is empty
+// The shape's partial slice is placed alongside the whole ones. It is empty
 // unless slices are being distributed and the PodSet count is not a multiple of
 // the slice size.
 func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, count int32, leaderCount int32, shape sliceShape, unconstrained bool, distributeSlices bool) []*domain {
@@ -2091,12 +2091,12 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 		remainingPrimary = count / shape.size
 	}
 	remainingLeaderCount := leaderCount
-	// The incomplete slice is only tracked while whole slices are distributed.
+	// The partial slice is only tracked while whole slices are distributed.
 	// Below the slice level the pods of the domain holding it, including its
 	// own, are distributed one by one.
 	tailPending := distributeSlices && shape.hasTail()
 
-	// finish closes the assignment, giving the incomplete slice a home once the
+	// finish closes the assignment, giving the partial slice a home once the
 	// whole slices have been distributed.
 	finish := func(used []*domain) []*domain {
 		if !tailPending {

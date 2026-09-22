@@ -2968,8 +2968,8 @@ func TestMatchingLeavesCacheIsInvisible(t *testing.T) {
 
 // sliceLevelUsages has to report the domains in the order they appear in the
 // assignment, which is the order the ungater ranks pods in. Both callers depend
-// on it: they single out the last domain as the one allowed to hold an
-// incomplete slice.
+// on it: they single out the last domain as the one allowed to hold a
+// partial slice.
 func TestSliceLevelUsagesPreserveAssignmentOrder(t *testing.T) {
 	const rackLabel = "cloud.provider.com/topology-rack"
 	_, log := utiltesting.ContextWithLog(t)
@@ -3111,13 +3111,13 @@ func TestAssignmentSliceAligned(t *testing.T) {
 			sliceSize:  2,
 			want:       true,
 		},
-		"the incomplete slice is last": {
+		"the partial slice is last": {
 			assignment: assignment(hostCount{"n1", 2}, hostCount{"n3", 1}),
 			request:    sliceRequest(rackLabel, 2),
 			sliceSize:  2,
 			want:       true,
 		},
-		"the incomplete slice is not last": {
+		"the partial slice is not last": {
 			assignment: assignment(hostCount{"n1", 1}, hostCount{"n3", 2}),
 			request:    sliceRequest(rackLabel, 2),
 			sliceSize:  2,
@@ -3154,14 +3154,14 @@ func TestAssignmentSliceAligned(t *testing.T) {
 			sliceSize:   2,
 			want:        true,
 		},
-		"virtual hostname topology with incomplete slice last": {
+		"virtual hostname topology with partial slice last": {
 			virtualHostname: true,
 			assignment:      rackAssignment(hostCount{"r2", 2}, hostCount{"r1", 1}),
 			request:         sliceRequest(rackLabel, 2),
 			sliceSize:       2,
 			want:            true,
 		},
-		"virtual hostname topology with incomplete slice not last": {
+		"virtual hostname topology with partial slice not last": {
 			virtualHostname: true,
 			assignment:      rackAssignment(hostCount{"r1", 1}, hostCount{"r2", 2}),
 			request:         sliceRequest(rackLabel, 2),

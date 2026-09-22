@@ -9338,7 +9338,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice with a leader: the leader gives way to the incomplete slice": {
+		"partial slice with a leader: the leader gives way to the partial slice": {
 			//              b1
 			//        /            \
 			//       r1             r2
@@ -9347,7 +9347,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			// leader: 1, workers: 7, sliceSize: 4, slices at the rack level
 			//
 			// r1 is the only rack that fits a whole slice, and the three pods
-			// it has left over are also the only room for the incomplete
+			// it has left over are also the only room for the partial
 			// slice. The leader therefore has to take r2, even though r1 holds
 			// the same number of whole slices with the leader as without it.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
@@ -9466,7 +9466,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: a rack with no room for the incomplete slice is skipped": {
+		"partial slice: a rack with no room for the partial slice is skipped": {
 			//            b1
 			//        /        \
 			//       r1         r2
@@ -9475,7 +9475,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			// workers: 5, sliceSize: 2, required: rack
 			//
 			// r1 holds exactly the two whole slices and nothing more, so it
-			// cannot hold the incomplete slice as well and its capacity counts
+			// cannot hold the partial slice as well and its capacity counts
 			// as one slice rather than two. r2 is the only rack that fits the
 			// PodSet, and all 5 pods go there.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
@@ -9513,7 +9513,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: descent from block to rack prefers the rack that also holds the incomplete slice": {
+		"partial slice: descent from block to rack prefers the rack that also holds the partial slice": {
 			//            b1
 			//        /        \
 			//       r1         r2
@@ -9561,7 +9561,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: descent from block to rack uses the tighter whole-slice closing rack when an earlier rack already hosts the incomplete slice": {
+		"partial slice: descent from block to rack uses the tighter whole-slice closing rack when an earlier rack already hosts the partial slice": {
 			//                 b1
 			//          /      |       \
 			//        r1       r2      r3
@@ -9570,9 +9570,9 @@ func TestFindTopologyAssignments(t *testing.T) {
 			// workers: 25, sliceSize: 8, required: block, slices at the rack level
 			//
 			// r1 takes 2 whole slices (16 pods) and still has room for the 1-pod
-			// incomplete slice (sliceCountWithTail = 2). For the remaining 1 whole
+			// partial slice (sliceCountWithTail = 2). For the remaining 1 whole
 			// slice, best-fit should pick r2 (8 pods) rather than r3 (15 pods), and
-			// place the incomplete slice in r1 (17 pods total, moved last).
+			// place the partial slice in r1 (17 pods total, moved last).
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
 			nodes: []corev1.Node{
 				*testingnode.MakeNode("b1-r1-x1").
@@ -9622,7 +9622,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			//     x1:4    x2:4   x3:4         x4:4  x5:4  x6:2
 			// workers: 10, sliceSize: 4, required: block, slices at the rack level
 			//
-			// Both blocks hold 2 whole slices alongside the 2-pod incomplete
+			// Both blocks hold 2 whole slices alongside the 2-pod partial
 			// slice (sliceCountWithTail = 2), and b1 sorts first because it
 			// holds 3 whole slices without the tail (sliceCount = 3 > 2). Best
 			// fit must prefer b2 (10 pods, 2 whole slices) over b1 (12 pods, 3
@@ -9676,7 +9676,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: the block holding the incomplete slice is preferred over an equally large one": {
+		"partial slice: the block holding the partial slice is preferred over an equally large one": {
 			//                b1                            b2
 			//        /    /     \    \              /      |      \
 			//      r1     r2    r3    r4          r5      r6      r7
@@ -9742,7 +9742,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: a second block is opened for the incomplete slice alone": {
+		"partial slice: a second block is opened for the partial slice alone": {
 			//            b1                 b2
 			//        /        \              |
 			//       r1         r2            r3
@@ -9750,7 +9750,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			//     x1:4       x2:4          x3:2
 			// request: 10, sliceSize: 4, preferred: block, slices at the rack level
 			//
-			// b1 holds both whole slices and nothing else, so the incomplete
+			// b1 holds both whole slices and nothing else, so the partial
 			// slice has to open b2. Charging it for a whole slice would need a
 			// rack with 4 free slots, which b2 does not have.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
@@ -9790,7 +9790,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: a block passed over by best fit still takes the incomplete slice": {
+		"partial slice: a block passed over by best fit still takes the partial slice": {
 			//        b1          b2              b3
 			//        |           |           /        \
 			//        r1          r2         r3         r4
@@ -9803,7 +9803,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			// block has room left for the trailing pod. b1 is the only block
 			// that can still take it, and it was passed over while the whole
 			// slices were placed, so it is only found if the search for a home
-			// for the incomplete slice looks at every block rather than at
+			// for the partial slice looks at every block rather than at
 			// those after the one that closed the count.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
 			nodes: []corev1.Node{
@@ -9846,7 +9846,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: a PodSet shorter than a slice is placed as one incomplete slice": {
+		"partial slice: a PodSet shorter than a slice is placed as one partial slice": {
 			//        b1
 			//        |
 			//        r1
@@ -9854,7 +9854,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			//       x1:3
 			// request: 3, sliceSize: 4
 			//
-			// There are no whole slices, so the PodSet is the incomplete slice
+			// There are no whole slices, so the PodSet is the partial slice
 			// and is placed as a slice of its own size. Reserving a full slice
 			// would need a fourth slot that the topology does not have.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
@@ -9884,7 +9884,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: the incomplete slice is moved last when the slice level is above the hostname": {
+		"partial slice: the partial slice is moved last when the slice level is above the hostname": {
 			//            b1
 			//        /        \
 			//       r1         r2
@@ -9933,7 +9933,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			},
 		},
-		"partial slice: the trailing pods form an incomplete last slice": {
+		"partial slice: the trailing pods form a partial last slice": {
 			//        b1
 			//        |
 			//        r1
@@ -9978,7 +9978,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 			}},
 		},
 		"partial slice: the trailing pods are dropped when the feature is disabled": {
-			// Same input as above with the feature off: the incomplete slice is
+			// Same input as above with the feature off: the partial slice is
 			// rounded away and only 8 of the 10 pods are assigned.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: false},
 			nodes: []corev1.Node{
@@ -10012,7 +10012,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 			}},
 		},
-		"partial slice: a node is not replaced in an assignment that holds an incomplete slice": {
+		"partial slice: a node is not replaced in an assignment that holds a partial slice": {
 			//       b1
 			//        |
 			//       r1
@@ -10062,7 +10062,7 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 				requests:   map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000},
 				count:      3,
-				wantReason: "cannot replace the node x1 in an assignment that holds an incomplete PodSet slice",
+				wantReason: "cannot replace the node x1 in an assignment that holds a partial PodSet slice",
 			}},
 		},
 		"multi-layer replacement: replace unhealthy node in incomplete rack slice": {

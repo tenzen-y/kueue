@@ -254,7 +254,7 @@ func ValidateSliceSizeAnnotationUpperBound(replicaPath *field.Path, replicaMetad
 				))
 			} else if features.Enabled(features.TASPartialSlices) && len(constraints) > 1 &&
 				constraints[0].Size > 0 && podSet.Count%constraints[0].Size != 0 {
-				// An incomplete last slice is supported for a single layer only.
+				// A partial last slice is supported for a single layer only.
 				// The inner layers subdivide a slice further, and the trailing
 				// pods generally do not divide by their sizes.
 				allErrs = append(allErrs, field.Invalid(

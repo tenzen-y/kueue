@@ -27,13 +27,13 @@ import (
 )
 
 // Placing a PodSet whose count is not a multiple of the slice size means
-// placing k whole slices and one shorter, incomplete slice of tailSize pods.
-// The incomplete slice is subject to the same constraint as the whole ones: it
+// placing k whole slices and one shorter, partial slice of tailSize pods.
+// The partial slice is subject to the same constraint as the whole ones: it
 // has to be held by a single domain at the slice level.
 //
 // The placement algorithm reasons in whole slices, so every domain carries a
 // second capacity figure alongside sliceCount: the number of whole slices it
-// can still hold once it also holds the incomplete slice. It is computed
+// can still hold once it also holds the partial slice. It is computed
 // bottom-up in fillInCountsHelper, in the same pass and the same shape as the
 // leader capacity:
 //
@@ -41,18 +41,18 @@ import (
 //	above:               sliceCountWithTail(d) = sliceCount(d) − min_c tailPenalty(c)
 //
 // where tailPenalty(c) = sliceCount(c) − sliceCountWithTail(c) is what the
-// child subtree c gives up by taking the incomplete slice, and the minimum runs
+// child subtree c gives up by taking the partial slice, and the minimum runs
 // over the children that can hold it at all. The domain selection then knows,
-// before it commits to a set of domains, whether the incomplete slice has a
+// before it commits to a set of domains, whether the partial slice has a
 // home inside it, which is what neither reserving a whole slice for it nor
 // placing it after the whole slices can know.
 
-// noTailFit marks a domain that cannot hold the incomplete slice at all. It is
+// noTailFit marks a domain that cannot hold the partial slice at all. It is
 // negative so that it compares as "no room" against any number of slices,
 // including zero.
 const noTailFit int32 = -1
 
-// hasTail reports whether the PodSet has an incomplete slice to place.
+// hasTail reports whether the PodSet has a partial slice to place.
 func (sh sliceShape) hasTail() bool {
 	return sh.tailSize > 0
 }
@@ -78,7 +78,7 @@ func newSliceShape(tr *kueue.PodSetTopologyRequest, count, sliceSize int32) slic
 }
 
 // sliceCountHostingTail returns the number of whole slices that still fit in a
-// domain at the slice level once the incomplete slice is placed in it.
+// domain at the slice level once the partial slice is placed in it.
 func sliceCountHostingTail(podCount int32, shape sliceShape) int32 {
 	if podCount < shape.tailSize {
 		return noTailFit
@@ -87,7 +87,7 @@ func sliceCountHostingTail(podCount int32, shape sliceShape) int32 {
 }
 
 // fillTailCountsAtSliceLevel computes the tail capacities of a domain at the
-// slice level, where the incomplete slice is charged directly against the
+// slice level, where the partial slice is charged directly against the
 // domain's own pod count.
 func fillTailCountsAtSliceLevel(ds *domainState, shape sliceShape) {
 	ds.sliceCountWithTail = sliceCountHostingTail(ds.podCount, shape)
@@ -95,7 +95,7 @@ func fillTailCountsAtSliceLevel(ds *domainState, shape sliceShape) {
 }
 
 // fillTailCounts computes the tail capacities of one domain, either directly
-// when the domain is the one that has to hold the incomplete slice whole, or by
+// when the domain is the one that has to hold the partial slice whole, or by
 // charging the cheapest of its children for it.
 //
 // Child penalties are measured against the children's own slice counts, so they
@@ -117,15 +117,19 @@ func fillTailCounts(ds *domainState, shape sliceShape, atSliceLevel bool, childr
 	}
 }
 
-// cheapestChild tracks the two children that give up the fewest slices by
-// taking on an obligation. The runner-up is needed because the leader and the
-// incomplete slice may have to go to different children, and the cheapest child
-// for one of them can be the cheapest for the other as well.
+// cheapestChild tracks the two children with the lowest slice penalty
+// (slices given up to host a partial slice or leader). Both are kept because
+// the leader and partial slice may compete for the same cheapest child.
 type cheapestChild struct {
-	bestIdx   int
-	best      int32
-	second    int32
-	hasBest   bool
+	// bestIdx is the index of the child with the lowest penalty.
+	bestIdx int
+	// best is the lowest slice penalty seen so far.
+	best int32
+	// second is the runner-up slice penalty seen so far.
+	second int32
+	// hasBest reports whether at least one eligible child was seen.
+	hasBest bool
+	// hasSecond reports whether at least two eligible children were seen.
 	hasSecond bool
 }
 
@@ -140,12 +144,12 @@ func (c *cheapestChild) add(idx int, penalty int32) {
 }
 
 // tailPenaltyTracker accumulates, over the children of one domain, the cost in
-// whole slices of hosting the incomplete slice, and of hosting both the leader
-// and the incomplete slice.
+// whole slices of hosting the partial slice, and of hosting both the leader
+// and the partial slice.
 type tailPenaltyTracker struct {
 	tail   cheapestChild
 	leader cheapestChild
-	// both is the cheapest single child holding the leader and the incomplete
+	// both is the cheapest single child holding the leader and the partial
 	// slice together.
 	both    int32
 	hasBoth bool
@@ -170,14 +174,14 @@ func (t *tailPenaltyTracker) add(idx int, ds *domainState, leaderEligible bool) 
 	}
 }
 
-// tailPenalty returns the slices the domain gives up by holding the incomplete
+// tailPenalty returns the slices the domain gives up by holding the partial
 // slice somewhere among its children, and whether it can hold it at all.
 func (t *tailPenaltyTracker) tailPenalty() (int32, bool) {
 	return t.tail.best, t.tail.hasBest
 }
 
 // leaderAndTailPenalty returns the slices the domain gives up by holding both
-// the leader and the incomplete slice, which may end up in the same child or in
+// the leader and the partial slice, which may end up in the same child or in
 // two different ones.
 func (t *tailPenaltyTracker) leaderAndTailPenalty() (int32, bool) {
 	best, found := t.both, t.hasBoth
@@ -199,19 +203,19 @@ func (t *tailPenaltyTracker) leaderAndTailPenalty() (int32, bool) {
 
 // sliceCapacity returns the number of whole slices the domain can hold while
 // also holding the obligations it is asked about. It returns noTailFit when the
-// incomplete slice is asked for and does not fit.
+// partial slice is asked for and does not fit.
 func (s *TASFlavorSnapshot) sliceCapacity(d *domain, withLeader, withTail bool) int32 {
 	return s.domainStateOf(d).sliceCapacity(withLeader, withTail)
 }
 
-// canHostTail reports whether the incomplete slice fits in the domain, with no
+// canHostTail reports whether the partial slice fits in the domain, with no
 // whole slices of this PodSet alongside it.
 func (s *TASFlavorSnapshot) canHostTail(d *domain) bool {
 	return s.domainStateOf(d).sliceCountWithTail != noTailFit
 }
 
 // findBestFitDomainForSlicesWithTail is findBestFitDomainForSlices for the
-// domain that also takes the incomplete slice, so the domains are ranked by the
+// domain that also takes the partial slice, so the domains are ranked by the
 // number of whole slices they hold next to it, breaking ties by their whole
 // slice capacity because candidates are ordered whole-slice descending.
 func (s *TASFlavorSnapshot) findBestFitDomainForSlicesWithTail(domains []*domain, sliceCount int32, leaderCount int32) *domain {
@@ -243,7 +247,7 @@ func (s *TASFlavorSnapshot) findBestFitDomainForSlicesWithTail(domains []*domain
 }
 
 // cheapestTailDomains ranks the domains by the whole slices they give up by
-// taking the incomplete slice. Two of them are kept, because the cheapest one
+// taking the partial slice. Two of them are kept, because the cheapest one
 // may be the domain that ends up holding the leader.
 func (s *TASFlavorSnapshot) cheapestTailDomains(domains []*domain) cheapestChild {
 	var tail cheapestChild
@@ -258,13 +262,13 @@ func (s *TASFlavorSnapshot) cheapestTailDomains(domains []*domain) cheapestChild
 }
 
 // leaderPenaltyWithTail returns the whole slices the domains give up when the
-// leader goes to domains[idx] and the incomplete slice goes wherever it costs
+// leader goes to domains[idx] and the partial slice goes wherever it costs
 // the least: to the same domain, or to the cheapest of the others. It reports
-// false when putting the leader there leaves the incomplete slice no home.
+// false when putting the leader there leaves the partial slice no home.
 //
 // The two obligations are costed together because they compete for the same
 // room, which is also how fillTailCounts costs them over the children of a
-// domain. Costing the leader alone picks domains that the incomplete slice then
+// domain. Costing the leader alone picks domains that the partial slice then
 // has to be rejected for.
 func (s *TASFlavorSnapshot) leaderPenaltyWithTail(domains []*domain, tailCosts *cheapestChild, idx int) (int32, bool) {
 	ds := s.domainStateOf(domains[idx])
@@ -286,7 +290,7 @@ func (s *TASFlavorSnapshot) leaderPenaltyWithTail(domains []*domain, tailCosts *
 }
 
 // hostsTailWithAssignedSlices reports whether the domain can take the
-// incomplete slice on top of the whole slices already assigned to it. The
+// partial slice on top of the whole slices already assigned to it. The
 // assigned count is read from sliceCount, which the descent trims to what the
 // domain was given, while the tail capacities keep describing the room the
 // domain started with.
@@ -299,11 +303,11 @@ func (s *TASFlavorSnapshot) hostsTailWithAssignedSlices(d *domain) bool {
 	return capacity != noTailFit && ds.sliceCount <= capacity
 }
 
-// placeTail gives the incomplete slice to one of the domains, and returns the
+// placeTail gives the partial slice to one of the domains, and returns the
 // domain it had to add to the assigned set to do so, if any.
 //
 // A domain that already holds whole slices of this PodSet is preferred, so that
-// the incomplete slice does not widen the placement; only when none of them has
+// the partial slice does not widen the placement; only when none of them has
 // the room for it is an unused domain opened.
 func (s *TASFlavorSnapshot) placeTail(assigned, candidates []*domain, tailSize int32) (*domain, bool) {
 	for _, d := range assigned {
@@ -325,22 +329,22 @@ func (s *TASFlavorSnapshot) placeTail(assigned, candidates []*domain, tailSize i
 	return d, true
 }
 
-// appendTailDomain closes an assignment by giving the incomplete slice a home
+// appendTailDomain closes an assignment by giving the partial slice a home
 // among the domains already used, or in one of those left unused, and returns
 // the resulting set.
 //
 // Every candidate is offered, not only those past the domain that closed the
 // count: best fit takes the closing domain out of order, leaving earlier ones
 // unused. This mirrors findLevelWithFitDomains, which selected the domains
-// knowing the incomplete slice has a home among them.
+// knowing the partial slice has a home among them.
 //
-// It returns nil when no domain can take the incomplete slice, which the
+// It returns nil when no domain can take the partial slice, which the
 // capacity roll-up is meant to have ruled out before the descent began.
 func (s *TASFlavorSnapshot) appendTailDomain(used, candidates []*domain, shape sliceShape, count int32) []*domain {
 	added, ok := s.placeTail(used, candidates, shape.tailSize)
 	if !ok {
 		// Error logs are not verbosity-gated; dumping leaves scales with cluster size.
-		s.log.Error(errCodeAssumptionsViolated, "no domain left to hold the incomplete slice",
+		s.log.Error(errCodeAssumptionsViolated, "no domain left to hold the partial slice",
 			"count", count,
 			"tailSize", shape.tailSize,
 			"sliceSize", shape.size,
@@ -355,7 +359,7 @@ func (s *TASFlavorSnapshot) appendTailDomain(used, candidates []*domain, shape s
 }
 
 // selectionHoldsTail reports whether one of the selected domains has room for
-// the incomplete slice next to the whole slices it is expected to take.
+// the partial slice next to the whole slices it is expected to take.
 //
 // It runs before any count is assigned, so the expected amounts are passed in
 // rather than read from the domains.
@@ -370,7 +374,7 @@ func (s *TASFlavorSnapshot) selectionHoldsTail(selected []*domain, assignedSlice
 }
 
 // firstDomainHostingTail returns the first of the candidates that can hold the
-// incomplete slice and is not selected yet, or nil when there is none.
+// partial slice and is not selected yet, or nil when there is none.
 func (s *TASFlavorSnapshot) firstDomainHostingTail(candidates, selected []*domain) *domain {
 	taken := sets.New(selected...)
 	for _, d := range candidates {
@@ -386,7 +390,7 @@ func (s *TASFlavorSnapshot) firstDomainHostingTail(candidates, selected []*domai
 }
 
 // closingDomainWithTail checks whether the remaining whole slices, any
-// remaining leaders, and the incomplete slice can all be closed in a single
+// remaining leaders, and the partial slice can all be closed in a single
 // domain from candidates without stepping up to a larger whole-slice tier than
 // the best-fit whole-slice choice.
 func (s *TASFlavorSnapshot) closingDomainWithTail(
@@ -434,16 +438,16 @@ func (s *TASFlavorSnapshot) sliceLevelDomain(levels, values []string, sliceLevel
 	return domain
 }
 
-// normalizeTailLast moves the pods of the incomplete slice to the end of the
+// normalizeTailLast moves the pods of the partial slice to the end of the
 // domain ordering.
 //
 // The ungater ranks the pods of a PodSet by the order the domains appear in the
 // published assignment (see rankToDomainID), so a slice occupies one domain in
 // rank space only if the domain holding the trailing pods comes last. Domains
 // are otherwise ordered by their level values, which says nothing about where
-// the incomplete slice ends up, so the order is corrected here.
+// the partial slice ends up, so the order is corrected here.
 //
-// Which domain holds the incomplete slice is recomputed from the assignment
+// Which domain holds the partial slice is recomputed from the assignment
 // rather than remembered, which makes this idempotent and stable across the
 // merges done to repair an assignment. It is a no-op when the pods divide
 // evenly into slices.
@@ -506,7 +510,7 @@ func (s *TASFlavorSnapshot) normalizeTailLast(ta *utiltas.TopologyAssignment, tr
 
 // assignmentSliceAligned reports whether the assignment groups pods into whole
 // slices: every domain at the slice level holds a multiple of sliceSize pods,
-// except the last, which may hold the trailing pods of an incomplete slice.
+// except the last, which may hold the trailing pods of a partial slice.
 func (s *TASFlavorSnapshot) assignmentSliceAligned(ta *utiltas.TopologyAssignment, tr *kueue.PodSetTopologyRequest, sliceSize int32) bool {
 	if !features.Enabled(features.TASPartialSlices) || !slicesRequested(tr) || sliceSize <= 1 {
 		return true

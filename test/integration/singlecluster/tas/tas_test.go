@@ -4818,7 +4818,7 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 
 					// Leader pod assigned matches request
 					gomega.Expect(assignedPodCount(wl.Status.Admission.PodSetAssignments[0].TopologyAssignment)).To(gomega.Equal(int32(1)))
-					// 19 workers with slice size 5 yields 3 full slices (15 pods) + 1 incomplete slice (4 pods) = 19 pods assigned
+					// 19 workers with slice size 5 yields 3 full slices (15 pods) + 1 partial slice (4 pods) = 19 pods assigned
 					gomega.Expect(assignedPodCount(wl.Status.Admission.PodSetAssignments[1].TopologyAssignment)).To(gomega.Equal(int32(19)))
 
 					for i, domain := range workerTA.Domains {
@@ -5219,7 +5219,7 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 					features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASPartialSlices, true)
 				})
 
-				ginkgo.It("scheduler covers all pods including the incomplete slice", func() {
+				ginkgo.It("scheduler covers all pods including the partial slice", func() {
 					var wl *kueue.Workload
 
 					ginkgo.By("creating a slice-topology workload whose count (3) is not divisible by the slice size (2)", func() {

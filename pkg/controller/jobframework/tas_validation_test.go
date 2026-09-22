@@ -589,7 +589,7 @@ func TestValidateSliceSizeAnnotationUpperBound(t *testing.T) {
 				&field.Error{Type: field.ErrorTypeInvalid, Field: annotationsPath.Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation).String()},
 			},
 		},
-		// An incomplete last slice is only supported for a single layer, so
+		// A partial last slice is only supported for a single layer, so
 		// with the feature on by default a multi-layer request has to divide evenly.
 		"invalid: partial slices, multi-layer outermost size does not divide the pod count": {
 			annotations: map[string]string{
@@ -610,7 +610,7 @@ func TestValidateSliceSizeAnnotationUpperBound(t *testing.T) {
 			},
 			podSetCount: 20,
 		},
-		"valid: partial slices, a single layer may leave an incomplete slice": {
+		"valid: partial slices, a single layer may leave a partial slice": {
 			annotations: map[string]string{
 				kueue.PodSetRequiredTopologyAnnotation:                 "cloud.com/block",
 				kueue.PodSetSliceRequiredTopologyConstraintsAnnotation: `[{"topology":"cloud.com/rack","size":16}]`,

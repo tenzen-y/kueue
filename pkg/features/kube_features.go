@@ -752,7 +752,7 @@ const (
 	// owner: @pajakd
 	//
 	// Allow a PodSet slice size that does not evenly divide the PodSet count.
-	// The trailing pods form one incomplete slice, which is placed in a single
+	// The trailing pods form one partial slice, which is placed in a single
 	// topology domain just like a full slice. Without this gate the trailing
 	// pods are dropped from the assignment.
 	TASPartialSlices featuregate.Feature = "TASPartialSlices"
