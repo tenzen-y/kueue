@@ -10013,19 +10013,21 @@ func TestFindTopologyAssignments(t *testing.T) {
 			}},
 		},
 		"partial slice replacement: the damaged slice is repaired, not the partial one": {
-			//              b1
-			//      /       |        \
-			//     r1       r2       r3
-			//   / | \     /  \       |
-			// x1 x2 x6   x3  x4     x5
+			//                b1
+			//      /         |         \
+			//     r1         r2         r3
+			//   / | \       /  \       /  \
+			// x1 x2 x6     x3  x4     x5  x7
 			// ^(NotReady)
 			// request: 10, sliceSize: 4, slice topology: rack
 			//
-			// Racks hold 4, 4 and 2 pods, the last one being the partial
-			// slice. Losing x1 leaves r1 two pods short, and both r1 and r3
-			// would satisfy the plain "count is a multiple of the slice size"
-			// test. Only r1 is actually damaged, so the replacement pods must
-			// go there.
+			// Racks hold 4 (x1+x2), 4 (x3+x4) and 2 (x5) pods, the last one
+			// being the partial slice, while x6 (in r1) and x7 (in r3) are
+			// empty spare nodes. Losing x1 leaves r1 two pods short, and both
+			// r1 and r3 would satisfy the plain "count + missing is a multiple
+			// of the slice size" test. Only r1 is actually damaged, so the
+			// replacement pods must land on x6 (in r1) rather than x7 (in r3),
+			// and normalizeTailLast keeps x5 (r3) at the end after merging x6.
 			featureGates: map[featuregate.Feature]bool{features.TASPartialSlices: true},
 			nodes: []corev1.Node{
 				*testingnode.MakeNode("b1-r1-x1").
@@ -10052,6 +10054,17 @@ func TestFindTopologyAssignments(t *testing.T) {
 					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r3").Label(corev1.LabelHostname, "x5").
 					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourcePods: resource.MustParse("10")}).
 					Ready().Obj(),
+				*testingnode.MakeNode("b1-r3-x7").
+					Label(tasBlockLabel, "b1").Label(tasRackLabel, "r3").Label(corev1.LabelHostname, "x7").
+					StatusAllocatable(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourcePods: resource.MustParse("10")}).
+					Ready().Obj(),
+			},
+			aggregatedDomainUsages: map[tas.TopologyDomainID]resources.Requests{
+				"x1": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000, corev1.ResourcePods: 2}),
+				"x2": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000, corev1.ResourcePods: 2}),
+				"x3": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000, corev1.ResourcePods: 2}),
+				"x4": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000, corev1.ResourcePods: 2}),
+				"x5": resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: 2000, corev1.ResourcePods: 2}),
 			},
 			levels: defaultThreeLevels,
 			workload: utiltestingapi.MakeWorkload("test-wl", "test-ns").
@@ -10078,14 +10091,11 @@ func TestFindTopologyAssignments(t *testing.T) {
 				},
 				requests: map[corev1.ResourceName]int64{corev1.ResourceCPU: 1000},
 				count:    10,
-				// The two pods return to rack r1. The test harness does not
-				// replay the existing pods onto the nodes, so BestFit picks x2
-				// within r1 rather than x6. Had the partial slice in r3 been
-				// mistaken for the damaged one, x5 would have grown to 4.
 				wantAssignment: &tas.TopologyAssignment{
 					Levels: defaultOneLevel,
 					Domains: []tas.TopologyDomainAssignment{
-						{Count: 4, Values: []string{"x2"}},
+						{Count: 2, Values: []string{"x2"}},
+						{Count: 2, Values: []string{"x6"}},
 						{Count: 2, Values: []string{"x3"}},
 						{Count: 2, Values: []string{"x4"}},
 						{Count: 2, Values: []string{"x5"}},
