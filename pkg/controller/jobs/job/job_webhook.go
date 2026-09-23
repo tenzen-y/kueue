@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/features"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/util/webhook"
 	"sigs.k8s.io/kueue/pkg/workloadslicing"
 )
@@ -144,7 +145,7 @@ func (w *JobWebhook) validateCreate(ctx context.Context, job *Job) (field.ErrorL
 	allErrs = append(allErrs, w.validatePartialAdmissionCreate(job)...)
 	allErrs = append(allErrs, w.validateSyncCompletionCreate(job)...)
 	if features.Enabled(features.TopologyAwareScheduling) {
-		validationErrs, err := w.validateTopologyRequest(ctx, job)
+		validationErrs, err := w.validateTopologyRequestOnCreate(ctx, job)
 		if err != nil {
 			return nil, err
 		}
@@ -218,7 +219,7 @@ func (w *JobWebhook) validateUpdate(ctx context.Context, oldJob, newJob *Job) (f
 	allErrs = append(allErrs, jobframework.ValidateJobOnUpdate(oldJob, newJob, w.queues.DefaultLocalQueueExist)...)
 	allErrs = append(allErrs, validatePartialAdmissionUpdate(oldJob, newJob)...)
 	if features.Enabled(features.TopologyAwareScheduling) {
-		validationErrs, err := w.validateTopologyRequest(ctx, newJob)
+		validationErrs, err := w.validateTopologyRequestOnUpdate(ctx, oldJob, newJob)
 		if err != nil {
 			return nil, err
 		}
@@ -240,35 +241,68 @@ func validatePartialAdmissionUpdate(oldJob, newJob *Job) field.ErrorList {
 	return allErrs
 }
 
-func (w *JobWebhook) validateTopologyRequest(ctx context.Context, job *Job) (field.ErrorList, error) {
-	validationErrs := jobframework.ValidateTASPodSetRequest(replicaMetaPath, &job.Spec.Template.ObjectMeta)
-	if validationErrs != nil {
-		return validationErrs, nil
+func (w *JobWebhook) validateTopologyRequestOnCreate(ctx context.Context, job *Job) (field.ErrorList, error) {
+	podSets, validationErrs, err := w.validateTopologyAnnotations(ctx, job)
+	if err != nil || validationErrs != nil || len(podSets) == 0 {
+		return validationErrs, err
+	}
+	allErrs := jobframework.ValidateSliceSizeAnnotationUpperBound(replicaMetaPath, &job.Spec.Template.ObjectMeta, &podSets[0])
+	return append(allErrs, validatePartialAdmissionWithMultiLayerSlices(&podSets[0])...), nil
+}
+
+func (w *JobWebhook) validateTopologyRequestOnUpdate(ctx context.Context, oldJob, newJob *Job) (field.ErrorList, error) {
+	if sliceCountRulesChecked(oldJob, newJob) {
+		return w.validateTopologyRequestOnCreate(ctx, newJob)
+	}
+	_, validationErrs, err := w.validateTopologyAnnotations(ctx, newJob)
+	return validationErrs, err
+}
+
+func (w *JobWebhook) validateTopologyAnnotations(ctx context.Context, job *Job) ([]kueue.PodSet, field.ErrorList, error) {
+	if validationErrs := jobframework.ValidateTASPodSetRequest(replicaMetaPath, &job.Spec.Template.ObjectMeta); validationErrs != nil {
+		return nil, validationErrs, nil
 	}
 
 	// Reject elastic jobs with required/preferred topology (only unconstrained is supported).
 	// TODO: Support for required/preferred modes will be added in a future release.
 	if features.Enabled(features.ElasticJobsViaWorkloadSlices) && workloadslicing.Enabled(job.Object()) {
 		if _, hasRequired := job.Spec.Template.Annotations[kueue.PodSetRequiredTopologyAnnotation]; hasRequired {
-			return field.ErrorList{field.Forbidden(replicaMetaPath.Child("annotations", kueue.PodSetRequiredTopologyAnnotation),
+			return nil, field.ErrorList{field.Forbidden(replicaMetaPath.Child("annotations", kueue.PodSetRequiredTopologyAnnotation),
 				"required topology is not supported with elastic jobs")}, nil
 		}
 		if _, hasPreferred := job.Spec.Template.Annotations[kueue.PodSetPreferredTopologyAnnotation]; hasPreferred {
-			return field.ErrorList{field.Forbidden(replicaMetaPath.Child("annotations", kueue.PodSetPreferredTopologyAnnotation),
+			return nil, field.ErrorList{field.Forbidden(replicaMetaPath.Child("annotations", kueue.PodSetPreferredTopologyAnnotation),
 				"preferred topology is not supported with elastic jobs")}, nil
 		}
 	}
 
 	podSets, err := jobframework.JobPodSets(ctx, job, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return podSets, nil, nil
+}
 
-	if len(podSets) == 0 {
-		return nil, nil
+func sliceCountRulesChecked(oldJob, newJob *Job) bool {
+	minCount := newJob.minPodsCount()
+	if !ptr.Equal(oldJob.minPodsCount(), minCount) {
+		return true
 	}
+	for _, key := range []string{kueue.PodSetSliceSizeAnnotation, kueue.PodSetSliceRequiredTopologyConstraintsAnnotation} {
+		if oldJob.Spec.Template.Annotations[key] != newJob.Spec.Template.Annotations[key] {
+			return true
+		}
+	}
+	return minCount == nil && oldJob.podsCount() != newJob.podsCount()
+}
 
-	return jobframework.ValidateSliceSizeAnnotationUpperBound(replicaMetaPath, &job.Spec.Template.ObjectMeta, &podSets[0]), nil
+func validatePartialAdmissionWithMultiLayerSlices(podSet *kueue.PodSet) field.ErrorList {
+	if !features.Enabled(features.TASPartialSlices) || podSet.MinCount == nil ||
+		len(utiltas.PodSetSliceRequiredTopologyConstraints(podSet.TopologyRequest)) <= 1 {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(minPodsCountAnnotationsPath,
+		fmt.Sprintf("may not be set when more than one layer is specified in '%s'", kueue.PodSetSliceRequiredTopologyConstraintsAnnotation))}
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type

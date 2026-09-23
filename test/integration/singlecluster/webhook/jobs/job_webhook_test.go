@@ -19,6 +19,7 @@ package jobs
 import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	gomegatypes "github.com/onsi/gomega/types"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -255,6 +256,148 @@ var _ = ginkgo.Describe("Job Webhook with manageJobsWithoutQueueName disabled", 
 		updatedJob.Spec.Parallelism = new(int32(6))
 		delete(updatedJob.Annotations, job.StoppingAnnotation)
 		gomega.Expect(k8sClient.Update(ctx, updatedJob)).Should(gomega.Succeed())
+	})
+
+	ginkgo.When("the job requests topology slices", func() {
+		const multiLayerSlices = `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`
+
+		ginkgo.BeforeEach(func() {
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TopologyAwareScheduling, true)
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASMultiLayerTopology, true)
+			features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASPartialSlices, true)
+		})
+
+		ginkgo.DescribeTable("Validate the job on create", func(j func() *batchv1.Job, matcher gomegatypes.GomegaMatcher) {
+			gomega.Expect(k8sClient.Create(ctx, j())).Should(matcher)
+		},
+			ginkgo.Entry("min parallelism with single-layer slice constraints",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						SetAnnotation(job.JobMinParallelismAnnotation, "20").
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+						PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+						Obj()
+				},
+				gomega.Succeed()),
+			ginkgo.Entry("multi-layer slice constraints without min parallelism",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, multiLayerSlices).
+						Obj()
+				},
+				gomega.Succeed()),
+			ginkgo.Entry("min parallelism with multi-layer slice constraints",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						SetAnnotation(job.JobMinParallelismAnnotation, "20").
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, multiLayerSlices).
+						Obj()
+				},
+				gomega.MatchError(gomega.ContainSubstring("may not be set when more than one layer is specified"))),
+		)
+
+		ginkgo.DescribeTable("Validate the job on update",
+			func(j func() *batchv1.Job, createdBeforeTheRules bool, updates []batchv1.Job, matcher gomegatypes.GomegaMatcher) {
+				ginkgo.By("Creating a new Job")
+				createdJob := j()
+				if createdBeforeTheRules {
+					features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASPartialSlices, false)
+				}
+				util.MustCreate(ctx, k8sClient, createdJob)
+				features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASPartialSlices, true)
+				for _, update := range updates {
+					gomega.Eventually(func(g gomega.Gomega) {
+						var updatedJob batchv1.Job
+						g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(createdJob), &updatedJob)).To(gomega.Succeed())
+						updatedJob.Annotations = update.Annotations
+						updatedJob.Spec.Parallelism = update.Spec.Parallelism
+						updatedJob.Spec.Suspend = update.Spec.Suspend
+						g.Expect(k8sClient.Update(ctx, &updatedJob)).Should(matcher)
+					}, util.Timeout, util.Interval).Should(gomega.Succeed())
+				}
+			},
+			ginkgo.Entry("Kueue starts and stops a partially admitted job with a count its slice size does not divide",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						SetAnnotation(job.JobMinParallelismAnnotation, "20").
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+						PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+						Obj()
+				},
+				false,
+				[]batchv1.Job{
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(20)), Suspend: new(false)},
+					},
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20", job.StoppingAnnotation: "true"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(20)), Suspend: new(true)},
+					},
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(32)), Suspend: new(true)},
+					},
+				},
+				gomega.Succeed(),
+			),
+			ginkgo.Entry("Kueue starts and stops a job with min parallelism and multi-layer slice constraints created before the rule",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						SetAnnotation(job.JobMinParallelismAnnotation, "20").
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, multiLayerSlices).
+						Obj()
+				},
+				true,
+				[]batchv1.Job{
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(20)), Suspend: new(false)},
+					},
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20", job.StoppingAnnotation: "true"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(20)), Suspend: new(true)},
+					},
+					{
+						Annotations: map[string]string{job.JobMinParallelismAnnotation: "20"},
+						Spec:        batchv1.JobSpec{Parallelism: new(int32(32)), Suspend: new(true)},
+					},
+				},
+				gomega.Succeed(),
+			),
+			ginkgo.Entry("lowering the parallelism of a suspended job to a count its multi-layer slice does not divide",
+				func() *batchv1.Job {
+					return testingjob.MakeJob("job-with-queue-name", ns.Name).Queue("queue").
+						Parallelism(32).
+						Completions(32).
+						PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+						PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, multiLayerSlices).
+						Obj()
+				},
+				false,
+				[]batchv1.Job{
+					{
+						Spec: batchv1.JobSpec{Parallelism: new(int32(20)), Suspend: new(true)},
+					},
+				},
+				gomega.MatchError(gomega.ContainSubstring("must evenly divide pod set count 20 when more than one layer is specified")),
+			),
+		)
 	})
 
 	ginkgo.It("Should not set the default WorkloadPriorityClass label when the feature gate is disabled", func() {

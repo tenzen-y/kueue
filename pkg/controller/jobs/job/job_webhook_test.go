@@ -427,6 +427,54 @@ func TestValidateCreate(t *testing.T) {
 			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
 		},
 		{
+			name: "min parallelism with multi-layer slice constraints",
+			job: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Forbidden(minPodsCountAnnotationsPath, "may not be set when more than one layer is specified in 'kueue.x-k8s.io/podset-slice-required-topology-constraints'"),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "min parallelism with multi-layer slice constraints when partial slices are disabled",
+			job: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        false,
+			},
+		},
+		{
+			name: "min parallelism with single-layer slice constraints",
+			job: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16}]`).
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
 			name: "elastic job with required topology is rejected",
 			job: testingutil.MakeJob("job", "default").
 				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
@@ -1060,6 +1108,333 @@ func TestValidateUpdate(t *testing.T) {
 				field.Required(replicaMetaPath.Child("annotations").Key("kueue.x-k8s.io/podset-slice-size"), "must be set when 'kueue.x-k8s.io/podset-slice-required-topology' is specified"),
 			},
 			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
+		},
+		{
+			name: "Kueue unsuspends a partially admitted Job with a count the slice size does not divide",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "Kueue unsuspends a partially admitted Job with a count below the slice size",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(12).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
+		},
+		{
+			name: "lower the parallelism of a suspended Job with min parallelism below the slice size",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(12).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{features.TopologyAwareScheduling: true},
+		},
+		{
+			name: "Kueue restores the parallelism of a stopped Job to a count the slice size does not divide",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(36).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				SetAnnotation(StoppingAnnotation, "true").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(36).
+				Completions(36).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "lower the parallelism of a suspended Job with min parallelism to a count the slice size does not divide",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "attempt to add min parallelism while unsuspending a Job whose slice size does not divide the count",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(20).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(20).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(replicaMetaPath.Child("annotations").Key(kueue.PodSetSliceSizeAnnotation), "16", "must evenly divide pod set count 20 when min count is specified"),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "attempt to change the slice size of a suspended Job with min parallelism to one that does not divide the count",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(20).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "4").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(20).
+				SetAnnotation(JobMinParallelismAnnotation, "10").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyAnnotation, "cloud.com/rack").
+				PodAnnotation(kueue.PodSetSliceSizeAnnotation, "16").
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(replicaMetaPath.Child("annotations").Key(kueue.PodSetSliceSizeAnnotation), "16", "must evenly divide pod set count 20 when min count is specified"),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "attempt to unsuspend a Job without min parallelism with a count its multi-layer slice does not divide",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(32).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(
+					replicaMetaPath.Child("annotations").Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
+					int32(16),
+					"must evenly divide pod set count 20 when more than one layer is specified",
+				),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "update of a Job whose multi-layer slice does not divide an unchanged count",
+			oldJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(20).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Label("touched", "true").
+				Suspend(false).
+				Parallelism(20).
+				Completions(20).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "attempt to change the parallelism of a running Job to a count its multi-layer slice does not divide",
+			oldJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(32).
+				Completions(32).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(32).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(
+					replicaMetaPath.Child("annotations").Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
+					int32(16),
+					"must evenly divide pod set count 20 when more than one layer is specified",
+				),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "attempt to add min parallelism to a Job with multi-layer slice constraints",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Forbidden(minPodsCountAnnotationsPath, "may not be set when more than one layer is specified in 'kueue.x-k8s.io/podset-slice-required-topology-constraints'"),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "Kueue unsuspends a partially admitted Job with min parallelism and multi-layer slice constraints",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Suspend(false).
+				Parallelism(20).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "Kueue restores the parallelism of a stopped Job with min parallelism and multi-layer slice constraints",
+			oldJob: testingutil.MakeJob("job", "default").
+				Parallelism(20).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				SetAnnotation(StoppingAnnotation, "true").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Parallelism(32).
+				Completions(32).
+				SetAnnotation(JobMinParallelismAnnotation, "20").
+				PodAnnotation(kueue.PodSetRequiredTopologyAnnotation, "cloud.com/block").
+				PodAnnotation(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation, `[{"topology":"cloud.com/rack","size":16},{"topology":"kubernetes.io/hostname","size":4}]`).
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling: true,
+				features.TASMultiLayerTopology:   true,
+				features.TASPartialSlices:        true,
+			},
+		},
+		{
+			name: "correct an unconstrained topology annotation that is no longer accepted",
+			oldJob: testingutil.MakeJob("job", "default").
+				PodAnnotation(kueue.PodSetUnconstrainedTopologyAnnotation, "false").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				PodAnnotation(kueue.PodSetUnconstrainedTopologyAnnotation, "true").
+				Obj(),
+			featureGates: map[featuregate.Feature]bool{
+				features.TopologyAwareScheduling:             true,
+				features.TASRejectFalseUnconstrainedTopology: true,
+			},
 		},
 		{
 			name: "reject adding AdmissionGatedBy annotation after Job creation",
