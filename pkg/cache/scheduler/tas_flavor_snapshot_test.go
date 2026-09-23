@@ -2972,7 +2972,6 @@ func TestMatchingLeavesCacheIsInvisible(t *testing.T) {
 // partial slice.
 func TestSliceLevelUsagesPreserveAssignmentOrder(t *testing.T) {
 	const rackLabel = "cloud.provider.com/topology-rack"
-	_, log := utiltesting.ContextWithLog(t)
 
 	rackNode := node.MakeNode("").
 		StatusAllocatable(corev1.ResourceList{
