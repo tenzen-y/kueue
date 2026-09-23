@@ -2164,6 +2164,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 			domainState.podCount = domainState.sliceCount * shape.size
 			remainingPrimary -= domainState.sliceCount
 			result = append(result, dom)
+			tailHosted = tailHosted || (tailPending && s.hostsTailWithAssignedSlices(dom))
 			continue
 		}
 
