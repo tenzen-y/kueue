@@ -2106,7 +2106,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 	}
 
 	for i, dom := range domains {
-		if tailPending && !slices.ContainsFunc(result, s.hostsTailWithAssignedSlices) {
+		if tailPending && !tailHosted {
 			if tailDom, ok := s.closingDomainWithTail(domains[i:], remainingPrimary, remainingLeaderCount, shape, unconstrained); ok {
 				return append(result, tailDom)
 			}
