@@ -2095,7 +2095,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 	// Below the slice level the pods of the domain holding it, including its
 	// own, are distributed one by one.
 	tailPending := distributeSlices && shape.hasTail()
-
+	tailHosted := false
 	// finish closes the assignment, giving the partial slice a home once the
 	// whole slices have been distributed.
 	finish := func(used []*domain) []*domain {
