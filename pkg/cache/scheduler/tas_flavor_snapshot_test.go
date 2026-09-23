@@ -3026,6 +3026,7 @@ func TestSliceLevelUsagesPreserveAssignmentOrder(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+		_, log := utiltesting.ContextWithLog(t)
 			tree := newTopologyTree([]string{rackLabel, corev1.LabelHostname}, nodes, 0)
 			snapshot := newTASFlavorSnapshot(log, flavorInformation{TopologyName: "tas-topology"}, tree, newDefaultSimulatorSnapshot())
 
