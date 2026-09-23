@@ -238,6 +238,12 @@ func ValidateSliceSizeAnnotationUpperBound(replicaPath *field.Path, replicaMetad
 				annotationsPath.Key(kueue.PodSetSliceSizeAnnotation), sliceSizeValue,
 				fmt.Sprintf("must not be greater than pod set count %d", podSet.Count),
 			))
+		} else if features.Enabled(features.TASPartialSlices) && podSet.MinCount != nil &&
+			val > 0 && podSet.Count%int32(val) != 0 {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(kueue.PodSetSliceSizeAnnotation), sliceSizeValue,
+				fmt.Sprintf("must evenly divide pod set count %d when min count is specified", podSet.Count),
+			))
 		}
 	}
 
@@ -246,14 +252,15 @@ func ValidateSliceSizeAnnotationUpperBound(replicaPath *field.Path, replicaMetad
 	if constraintsJSON, constraintsFound := replicaMetadata.Annotations[kueue.PodSetSliceRequiredTopologyConstraintsAnnotation]; constraintsFound {
 		var constraints []kueue.PodsetSliceRequiredTopologyConstraint
 		if err := json.Unmarshal([]byte(constraintsJSON), &constraints); err == nil && len(constraints) > 0 {
-			if constraints[0].Size > podSet.Count {
+			switch {
+			case constraints[0].Size > podSet.Count:
 				allErrs = append(allErrs, field.Invalid(
 					annotationsPath.Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
 					constraints[0].Size,
 					fmt.Sprintf("must not be greater than pod set count %d", podSet.Count),
 				))
-			} else if features.Enabled(features.TASPartialSlices) && len(constraints) > 1 &&
-				constraints[0].Size > 0 && podSet.Count%constraints[0].Size != 0 {
+			case features.Enabled(features.TASPartialSlices) && len(constraints) > 1 &&
+				constraints[0].Size > 0 && podSet.Count%constraints[0].Size != 0:
 				// A partial last slice is supported for a single layer only.
 				// The inner layers subdivide a slice further, and the trailing
 				// pods generally do not divide by their sizes.
@@ -261,6 +268,13 @@ func ValidateSliceSizeAnnotationUpperBound(replicaPath *field.Path, replicaMetad
 					annotationsPath.Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
 					constraints[0].Size,
 					fmt.Sprintf("must evenly divide pod set count %d when more than one layer is specified", podSet.Count),
+				))
+			case features.Enabled(features.TASPartialSlices) && podSet.MinCount != nil &&
+				constraints[0].Size > 0 && podSet.Count%constraints[0].Size != 0:
+				allErrs = append(allErrs, field.Invalid(
+					annotationsPath.Key(kueue.PodSetSliceRequiredTopologyConstraintsAnnotation),
+					constraints[0].Size,
+					fmt.Sprintf("must evenly divide pod set count %d when min count is specified", podSet.Count),
 				))
 			}
 		}

@@ -550,6 +550,7 @@ func TestValidateSliceSizeAnnotationUpperBound(t *testing.T) {
 		featureGates  map[featuregate.Feature]bool
 		annotations   map[string]string
 		podSetCount   int32
+		minCount      *int32
 		wantErr       field.ErrorList
 		wantErrDetail string
 	}{
@@ -571,6 +572,19 @@ func TestValidateSliceSizeAnnotationUpperBound(t *testing.T) {
 			wantErr: field.ErrorList{
 				&field.Error{Type: field.ErrorTypeInvalid, Field: annotationsPath.Key(kueue.PodSetSliceSizeAnnotation).String()},
 			},
+		},
+		"invalid: partial slices with minCount": {
+			annotations: map[string]string{
+				kueue.PodSetSliceSizeAnnotation:             "16",
+				kueue.PodSetSliceRequiredTopologyAnnotation: "cloud.com/rack",
+				kueue.PodSetRequiredTopologyAnnotation:      "cloud.com/block",
+			},
+			podSetCount: 20,
+			minCount:    new(int32(16)),
+			wantErr: field.ErrorList{
+				&field.Error{Type: field.ErrorTypeInvalid, Field: annotationsPath.Key(kueue.PodSetSliceSizeAnnotation).String()},
+			},
+			wantErrDetail: "must evenly divide pod set count 20 when min count is specified",
 		},
 		"valid: multi-layer outermost size within bound": {
 			annotations: map[string]string{
@@ -626,7 +640,7 @@ func TestValidateSliceSizeAnnotationUpperBound(t *testing.T) {
 			meta := &metav1.ObjectMeta{
 				Annotations: tc.annotations,
 			}
-			podSet := &kueue.PodSet{Count: tc.podSetCount}
+			podSet := &kueue.PodSet{Count: tc.podSetCount, MinCount: tc.minCount}
 			gotErr := ValidateSliceSizeAnnotationUpperBound(replicaPath, meta, podSet)
 			if diff := cmp.Diff(tc.wantErr, gotErr, cmpopts.IgnoreFields(field.Error{}, "BadValue", "Detail")); diff != "" {
 				t.Errorf("Unexpected error (-want,+got):\n%s", diff)

@@ -186,18 +186,20 @@ func (t *tailPenaltyTracker) tailPenalty() (int32, bool) {
 // two different ones.
 func (t *tailPenaltyTracker) leaderAndTailPenalty() (int32, bool) {
 	best, found := t.both, t.hasBoth
-	consider := func(penalty int32, ok bool) {
-		if ok && (!found || penalty < best) {
-			best, found = penalty, true
-		}
-	}
 	if t.leader.hasBest && t.tail.hasBest {
 		if t.leader.bestIdx != t.tail.bestIdx {
-			consider(t.leader.best+t.tail.best, true)
+			best, found = minPenalty(best, found, t.leader.best+t.tail.best, true)
 		} else {
-			consider(t.leader.second+t.tail.best, t.leader.hasSecond)
-			consider(t.leader.best+t.tail.second, t.tail.hasSecond)
+			best, found = minPenalty(best, found, t.leader.second+t.tail.best, t.leader.hasSecond)
+			best, found = minPenalty(best, found, t.leader.best+t.tail.second, t.tail.hasSecond)
 		}
+	}
+	return best, found
+}
+
+func minPenalty(best int32, found bool, candidate int32, ok bool) (int32, bool) {
+	if ok && (!found || candidate < best) {
+		return candidate, true
 	}
 	return best, found
 }
@@ -328,6 +330,15 @@ func (s *TASFlavorSnapshot) placeTail(assigned, candidates []*domain, tailSize i
 	ds.leaderCount = 0
 	ds.podCount = tailSize
 	return d, true
+}
+
+// finishSliceDistribution closes the assignment, giving the partial slice a
+// home once the whole slices have been distributed.
+func (s *TASFlavorSnapshot) finishSliceDistribution(used, all []*domain, shape sliceShape, count int32, tailPending bool) []*domain {
+	if !tailPending {
+		return used
+	}
+	return s.appendTailDomain(used, all, shape, count)
 }
 
 // appendTailDomain closes an assignment by giving the partial slice a home

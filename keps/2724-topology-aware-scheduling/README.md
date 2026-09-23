@@ -17,6 +17,7 @@
     - [Story 8](#story-8)
     - [Story 9](#story-9)
     - [Story 10](#story-10)
+    - [Story 11](#story-11)
   - [Notes/Constraints/Caveats (Optional)](#notesconstraintscaveats-optional)
     - [Integration support](#integration-support)
       - [Job](#job)
@@ -242,6 +243,14 @@ preferred node affinity. If a workload cannot be scheduled entirely on the
 because this warm-up procedure is highly expensive, I want the scheduler to
 strictly prioritize the preferred node affinity even at the cost of workload
 fragmentation across multiple domains.
+
+#### Story 11
+
+Similar to [Story 9](#story-9), but I want Leader and its Workers to be placed
+together across a multi-layer topology. For example, I want a LeaderWorkerSet
+with 16 pods (15 workers and 1 leader) to be placed onto the same "block", in
+slices of 4 on the same "rack" (3 racks of 4 workers, and 1 rack with 3 workers
+and 1 leader).
 
 ### Notes/Constraints/Caveats (Optional)
 
@@ -1027,6 +1036,9 @@ keep the slices whole is rejected, and the Workload is rescheduled from scratch.
 Partial slices are supported for a single slice layer only: the inner layers
 of `kueue.x-k8s.io/podset-slice-required-topology-constraints` subdivide a slice
 further, and the trailing pods generally do not divide by their sizes.
+
+`PartialAdmission` (`minCount`) and `ElasticJobsViaWorkloadSlicesWithTAS` are not
+supported when the slice size does not evenly divide the PodSet count.
 
 ### Internal APIs
 

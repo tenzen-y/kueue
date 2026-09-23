@@ -2123,14 +2123,6 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 	// own, are distributed one by one.
 	tailPending := distributeSlices && shape.hasTail()
 	tailHosted := false
-	// finish closes the assignment, giving the partial slice a home once the
-	// whole slices have been distributed.
-	finish := func(used []*domain) []*domain {
-		if !tailPending {
-			return used
-		}
-		return s.appendTailDomain(used, domains, shape, count)
-	}
 
 	for i, dom := range domains {
 		if tailPending && !tailHosted {
@@ -2169,7 +2161,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 			result = append(result, d)
 			tailHosted = tailHosted || (tailPending && s.hostsTailWithAssignedSlices(d))
 			if completed {
-				return finish(result)
+				return s.finishSliceDistribution(result, domains, shape, count, tailPending)
 			}
 			continue
 		}
@@ -2186,7 +2178,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 				domainState.podCount = remainingPrimary * shape.size
 				domainState.sliceCount = remainingPrimary
 				result = append(result, dom)
-				return finish(result)
+				return s.finishSliceDistribution(result, domains, shape, count, tailPending)
 			}
 			domainState.podCount = domainState.sliceCount * shape.size
 			remainingPrimary -= domainState.sliceCount
