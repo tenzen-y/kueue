@@ -2140,6 +2140,7 @@ func (s *TASFlavorSnapshot) updateCountsToMinimumGeneric(domains []*domain, coun
 				)
 			}
 			result = append(result, d)
+			tailHosted = tailHosted || (tailPending && s.hostsTailWithAssignedSlices(d))
 			if completed {
 				return finish(result)
 			}
